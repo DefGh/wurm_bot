@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
 import time
 from pathlib import Path
 
@@ -40,6 +42,74 @@ class EventLogTail:
                 return relevant
             time.sleep(0.25)
         return collected
+
+
+@dataclass(frozen=True)
+class SkillGain:
+    name: str
+    amount: float
+    value: float
+    count: int
+
+
+class SkillLogTail:
+    def __init__(self, logs_dir: Path):
+        self.path = self._latest_skill_log(logs_dir)
+        self.offset = self.path.stat().st_size
+
+    @staticmethod
+    def _latest_skill_log(logs_dir: Path) -> Path:
+        files = sorted(logs_dir.glob("_Skills.*.txt"), key=lambda path: path.stat().st_mtime)
+        if not files:
+            raise RuntimeError(f"No skills log files found in {logs_dir}")
+        return files[-1]
+
+    def mark(self) -> None:
+        self.offset = self.path.stat().st_size
+
+    def read_new(self) -> list[str]:
+        with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(self.offset)
+            lines = handle.readlines()
+            self.offset = handle.tell()
+        return [line.strip() for line in lines if line.strip()]
+
+    def read_gains(self) -> list[SkillGain]:
+        return summarize_skill_gains(self.read_new())
+
+
+SKILL_GAIN_RE = re.compile(
+    r"^\[\d{2}:\d{2}:\d{2}\]\s+(.+?)\s+increased by\s+([0-9.,]+)\s+to\s+([0-9.,]+)$",
+    re.IGNORECASE,
+)
+
+
+def summarize_skill_gains(lines: list[str]) -> list[SkillGain]:
+    totals: dict[str, SkillGain] = {}
+    for line in lines:
+        match = SKILL_GAIN_RE.match(line)
+        if not match:
+            continue
+
+        name = match.group(1).strip()
+        amount = parse_skill_number(match.group(2))
+        value = parse_skill_number(match.group(3))
+        previous = totals.get(name)
+        if previous is None:
+            totals[name] = SkillGain(name=name, amount=amount, value=value, count=1)
+        else:
+            totals[name] = SkillGain(
+                name=name,
+                amount=previous.amount + amount,
+                value=value,
+                count=previous.count + 1,
+            )
+
+    return sorted(totals.values(), key=lambda item: (-item.amount, item.name.lower()))
+
+
+def parse_skill_number(text: str) -> float:
+    return float(text.replace(",", "."))
 
 
 def is_relevant_event(line: str) -> bool:

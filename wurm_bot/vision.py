@@ -34,10 +34,10 @@ def ocr_image(image: Image.Image) -> list[OcrText]:
 
 def scan() -> tuple[Image.Image, list[OcrText], list[Table], list[Candidate]]:
     image = sxtemp1.screenshot()
-    texts = ocr_image(image)
-    tables = find_tables(texts, image.size)
-    candidates = find_candidates(image, texts, tables)
-    return image, texts, tables, candidates
+    from .upgrade_targets import detect_upgrade_targets
+
+    detection = detect_upgrade_targets(image)
+    return detection.image, detection.texts, detection.tables, detection.targets
 
 
 def find_tables(texts: list[OcrText], image_size: tuple[int, int]) -> list[Table]:

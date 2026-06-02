@@ -1,0 +1,7 @@
+pyautogui
+pyscreeze
+pillow
+mss
+numpy
+opencv-python
+rapidocr-onnxruntime

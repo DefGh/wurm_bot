@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 
 import sxtemp1
 
@@ -9,15 +10,19 @@ from .config import USE_CLIENT_WINDOW_OFFSET
 
 
 def find_wurm_click_region() -> tuple[int, int, int, int]:
-    if not USE_CLIENT_WINDOW_OFFSET:
+    if sys.platform == "darwin" or not USE_CLIENT_WINDOW_OFFSET:
         return sxtemp1.find_wurm_region()
 
-    result = subprocess.run(
-        ["xwininfo", "-root", "-tree"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["xwininfo", "-root", "-tree"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return sxtemp1.find_wurm_region()
+
     candidates = []
     pattern = re.compile(
         r"^\s+(0x[0-9a-f]+).*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)\s+\+(-?\d+)\+(-?\d+)",

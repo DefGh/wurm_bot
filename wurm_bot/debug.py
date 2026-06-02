@@ -10,6 +10,16 @@ from .text import timestamp
 from .windows import screen_to_wurm_local
 
 
+def clean_screenshot_history() -> None:
+    if not SCREENS_DIR.exists():
+        return
+
+    for path in SCREENS_DIR.glob("*.png"):
+        if path.stem.endswith("_latest"):
+            continue
+        path.unlink()
+
+
 def _font():
     try:
         return ImageFont.truetype("DejaVuSans.ttf", 14)

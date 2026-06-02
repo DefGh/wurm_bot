@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 import sxtemp1
 
 from wurm_bot.config import DEBUG_SCREENSHOTS, IMPROVE_KEY, LOGS_DIR, REPAIR_KEY
-from wurm_bot.debug import save_debug_image, save_log_select_diagnostic, save_mouse_diagnostic
+from wurm_bot.debug import clean_screenshot_history, save_debug_image, save_log_select_diagnostic, save_mouse_diagnostic
 from wurm_bot.events import (
     EventLogTail,
+    SkillGain,
+    SkillLogTail,
     event_action_started_or_done,
     event_damaged,
     event_log_too_low_quality,
@@ -107,12 +110,6 @@ def improve_candidate(candidate: Candidate, log_tail: EventLogTail, max_improves
     return "continue", improve_presses
 
 
-def update_remaining_debug(candidates: list[Candidate]) -> None:
-    image, texts, tables, _fresh_candidates = scan()
-    log_rows = find_log_rows(texts, tables)
-    save_debug_image(image, candidates, "upgrade_carpenter_candidates", log_rows)
-
-
 def print_scan_summary(tables, log_rows, candidates) -> None:
     print(f"Tables: {[table.title for table in tables]}")
     print(f"Logs: {[(row.text, row.cx, row.cy) for row in log_rows]}")
@@ -124,10 +121,21 @@ def print_scan_summary(tables, log_rows, candidates) -> None:
         )
 
 
+def print_skill_gains(gains: list[SkillGain]) -> None:
+    if not gains:
+        print("Skill gains: none")
+        return
+
+    print("Skill gains:")
+    for gain in gains:
+        count = f", ticks={gain.count}" if gain.count > 1 else ""
+        print(f"- {gain.name}: +{gain.amount:.6f} -> {gain.value:.6f}{count}")
+
+
 def run(dry_run: bool = False, limit: int | None = None, max_improves: int | None = None) -> None:
     image, texts, tables, candidates = scan()
     log_rows = find_log_rows(texts, tables)
-    if DEBUG_SCREENSHOTS:
+    if DEBUG_SCREENSHOTS and dry_run:
         path = save_debug_image(image, candidates, "upgrade_carpenter_candidates", log_rows)
         print(f"Saved candidates screenshot: {path}")
 
@@ -139,42 +147,44 @@ def run(dry_run: bool = False, limit: int | None = None, max_improves: int | Non
         save_debug_image(image, [], "upgrade_carpenter_error_no_candidates")
         raise RuntimeError("No improvable item candidates found")
 
+    skill_tail = SkillLogTail(LOGS_DIR)
     first_container = candidates[0].table
-    click_wurm_local((first_container.x1 + first_container.x2) // 2, (first_container.y1 + first_container.y2) // 2)
-    time.sleep(0.2)
-    select_log(image, texts, tables)
+    try:
+        click_wurm_local((first_container.x1 + first_container.x2) // 2, (first_container.y1 + first_container.y2) // 2)
+        time.sleep(0.2)
+        select_log(image, texts, tables)
 
-    log_tail = EventLogTail(LOGS_DIR)
-    remaining_candidates = candidates[: min(limit, len(candidates))] if limit else list(candidates)
-    improve_presses = 0
-    candidate_index = 0
+        log_tail = EventLogTail(LOGS_DIR)
+        remaining_candidates = candidates[: min(limit, len(candidates))] if limit else list(candidates)
+        improve_presses = 0
+        candidate_index = 0
 
-    while candidate_index < len(remaining_candidates):
-        if max_improves is not None and improve_presses >= max_improves:
-            print(f"Reached improve press limit: {max_improves}")
-            break
+        while candidate_index < len(remaining_candidates):
+            if max_improves is not None and improve_presses >= max_improves:
+                print(f"Reached improve press limit: {max_improves}")
+                break
 
-        candidate = remaining_candidates[candidate_index]
-        x, y = candidate_action_point(candidate)
-        print(f"Improving: {candidate.name} at action point ({x}, {y})")
-        remaining = None if max_improves is None else max_improves - improve_presses
-        status, presses = improve_candidate(candidate, log_tail, max_improves=remaining)
-        improve_presses += presses
+            candidate = remaining_candidates[candidate_index]
+            x, y = candidate_action_point(candidate)
+            print(f"Improving: {candidate.name} at action point ({x}, {y})")
+            remaining = None if max_improves is None else max_improves - improve_presses
+            status, presses = improve_candidate(candidate, log_tail, max_improves=remaining)
+            improve_presses += presses
 
-        if status == "skip":
-            remaining_candidates.pop(candidate_index)
-        elif status == "limit":
-            update_remaining_debug(remaining_candidates[candidate_index:])
-            break
-        else:
-            # Stay on the same candidate until it is explicitly skipped or the
-            # global improve limit is reached.
-            pass
+            if status == "skip":
+                remaining_candidates.pop(candidate_index)
+            elif status == "limit":
+                break
+            else:
+                # Stay on the same candidate until it is explicitly skipped or the
+                # global improve limit is reached.
+                pass
 
-        update_remaining_debug(remaining_candidates[candidate_index:])
-        time.sleep(0.3)
+            time.sleep(0.3)
 
-    print(f"Improve key presses: {improve_presses}")
+        print(f"Improve key presses: {improve_presses}")
+    finally:
+        print_skill_gains(skill_tail.read_gains())
 
 
 def diagnose_mouse(candidate_index: int) -> None:
@@ -225,6 +235,43 @@ def diagnose_log_select() -> None:
     print(f"Saved log select diagnostic: {out_path}")
 
 
+def diagnose_window() -> None:
+    region = sxtemp1.find_wurm_region()
+    window = sxtemp1.find_wurm_window_macos() if sxtemp1.sys.platform == "darwin" else None
+    image = sxtemp1.screenshot()
+    path = save_debug_image(image, [], "upgrade_carpenter_window")
+    if window is not None:
+        print(f"Window id: {window.window_id}")
+    elif sxtemp1.sys.platform == "darwin":
+        print("Window id: not found; using rectangle fallback")
+    print(f"Window region: {region}")
+    print(f"Screenshot size: {image.size}")
+    print(f"Screenshot backend: {os.environ.get('WURM_MAC_SCREENSHOT_BACKEND', 'window')}")
+    print(f"Saved window diagnostic: {path}")
+
+
+def diagnose_windows() -> None:
+    if sxtemp1.sys.platform != "darwin":
+        raise RuntimeError("--diagnose-windows is only supported on macOS")
+
+    match = os.environ.get("WURM_WINDOW_MATCH", "Wurm Online").lower()
+    exclude = tuple(term.strip().lower() for term in os.environ.get("WURM_WINDOW_EXCLUDE", "").split(",") if term.strip())
+    windows = sorted(
+        sxtemp1.list_macos_windows_coregraphics(),
+        key=lambda item: item.window.width * item.window.height,
+        reverse=True,
+    )
+    for info in windows[:40]:
+        haystack = f"{info.owner} {info.title}".lower()
+        marker = "*" if match in haystack and not any(term in haystack for term in exclude) else " "
+        window = info.window
+        print(
+            f"{marker} id={window.window_id} layer={info.layer} "
+            f"region=({window.x},{window.y},{window.width},{window.height}) "
+            f"owner={info.owner!r} title={info.title!r}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Only scan and save candidate rectangles.")
@@ -232,9 +279,17 @@ def main() -> None:
     parser.add_argument("--max-improves", type=int, default=None, help="Limit total Improve key presses.")
     parser.add_argument("--diagnose-mouse", type=int, default=None, help="Move to candidate index and save a diagnostic screenshot.")
     parser.add_argument("--diagnose-log-select", action="store_true", help="Move to the visible log row, double-click it, and save a diagnostic screenshot.")
+    parser.add_argument("--diagnose-window", action="store_true", help="Save a screenshot of the detected Wurm window and print its region.")
+    parser.add_argument("--diagnose-windows", action="store_true", help="Print visible macOS windows used for Wurm window matching.")
     args = parser.parse_args()
 
-    if args.diagnose_log_select:
+    clean_screenshot_history()
+
+    if args.diagnose_windows:
+        diagnose_windows()
+    elif args.diagnose_window:
+        diagnose_window()
+    elif args.diagnose_log_select:
         diagnose_log_select()
     elif args.diagnose_mouse is not None:
         diagnose_mouse(args.diagnose_mouse)
