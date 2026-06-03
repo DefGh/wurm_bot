@@ -117,7 +117,9 @@ def is_relevant_event(line: str) -> bool:
     markers = (
         "you improve",
         "you damage",
+        "you start",
         "could be improved with a log",
+        "could be improved with a lump",
         "too low quality",
         "too far away",
         "must use",
@@ -128,6 +130,7 @@ def is_relevant_event(line: str) -> bool:
         "doesn't need repairing",
         "too busy",
         "does not need",
+        "bend spacetime",
     )
     return any(marker in text for marker in markers)
 
@@ -144,6 +147,16 @@ def event_needs_log(lines: list[str]) -> bool:
     return any("could be improved with a log" in normalize(line) for line in lines)
 
 
+def event_needs_other_tool(lines: list[str]) -> bool:
+    markers = (
+        "must use",
+        "will want",
+        "notches",
+        "could be improved with a lump",
+    )
+    return any(any(marker in normalize(line) for marker in markers) for line in lines)
+
+
 def event_log_too_low_quality(lines: list[str]) -> bool:
     return any("log is too low quality" in normalize(line) for line in lines)
 
@@ -154,6 +167,10 @@ def event_too_far_away(lines: list[str]) -> bool:
 
 def event_action_started_or_done(lines: list[str]) -> bool:
     return any(
-        any(marker in normalize(line) for marker in ("you improve", "you damage"))
+        any(marker in normalize(line) for marker in ("you start", "you improve", "you damage"))
         for line in lines
     )
+
+
+def event_self_tool_error(lines: list[str]) -> bool:
+    return any("bend spacetime" in normalize(line) for line in lines)

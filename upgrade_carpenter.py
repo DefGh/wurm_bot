@@ -16,7 +16,9 @@ from wurm_bot.events import (
     event_damaged,
     event_log_too_low_quality,
     event_needs_log,
+    event_needs_other_tool,
     event_needs_repair,
+    event_self_tool_error,
     event_too_far_away,
 )
 from wurm_bot.models import Candidate, candidate_action_point
@@ -35,14 +37,18 @@ def select_log(image, texts, tables) -> None:
 
     row = logs[0]
     log_x, log_y = log_click_point(row, tables)
+    print(f"Selecting log: {row.text!r} at ({log_x}, {log_y})")
+    move_wurm_local(log_x, log_y)
+    time.sleep(0.15)
     double_click_wurm_local(log_x, log_y)
-    time.sleep(0.7)
+    time.sleep(1.0)
 
 
 def log_click_point(row, tables) -> tuple[int, int]:
     for table in tables:
         if table.x1 <= row.cx <= table.x2 and table.y1 <= row.cy <= table.y2:
-            return (table.x1 + table.x2) // 2, row.cy
+            x = min(max(row.cx, table.name_x1 + 24), table.ql_x1 - 18)
+            return x, row.cy
     return row.cx, row.cy
 
 
@@ -86,6 +92,10 @@ def improve_candidate(candidate: Candidate, log_tail: EventLogTail, max_improves
             print(f"Skipping {candidate.name}: active log quality is too low")
             return "skip", improve_presses
 
+        if event_self_tool_error(lines):
+            print(f"Skipping {candidate.name}: active item/tool cannot improve itself")
+            return "skip", improve_presses
+
         if event_needs_repair(lines) or event_damaged(lines):
             repair_candidate(candidate, log_tail)
             time.sleep(0.2)
@@ -95,6 +105,9 @@ def improve_candidate(candidate: Candidate, log_tail: EventLogTail, max_improves
             image, texts, tables, _candidates = scan()
             select_log(image, texts, tables)
             time.sleep(0.2)
+            return "continue", improve_presses
+
+        if event_needs_other_tool(lines):
             return "continue", improve_presses
 
         if event_action_started_or_done(lines):

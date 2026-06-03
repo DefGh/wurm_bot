@@ -2,20 +2,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .config import MIN_ACTION_PIXELS, ROW_HEIGHT, SCREENS_DIR
-from .inventory_vertices import (
-    WINDOW_GROUP_OTHER,
-    WindowRectangle,
-    assemble_window_rectangles,
-    assign_window_titles,
-    detect_inventory_vertices,
-)
-from .models import Candidate, OcrText, Table, candidate_action_point
-from .text import normalize, timestamp
-from .vision import action_pixel_count, ocr_image, row_name_like, text_rows_for_table
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from wurm_bot.config import MIN_ACTION_PIXELS, ROW_HEIGHT, SCREENS_DIR
+    from wurm_bot.inventory_vertices import (
+        WINDOW_GROUP_OTHER,
+        WindowRectangle,
+        assemble_window_rectangles,
+        assign_window_titles,
+        detect_inventory_vertices,
+    )
+    from wurm_bot.models import Candidate, OcrText, Table, candidate_action_point
+    from wurm_bot.text import normalize, timestamp
+    from wurm_bot.vision import action_pixel_count, ocr_image, row_name_like, text_rows_for_table
+else:
+    from .config import MIN_ACTION_PIXELS, ROW_HEIGHT, SCREENS_DIR
+    from .inventory_vertices import (
+        WINDOW_GROUP_OTHER,
+        WindowRectangle,
+        assemble_window_rectangles,
+        assign_window_titles,
+        detect_inventory_vertices,
+    )
+    from .models import Candidate, OcrText, Table, candidate_action_point
+    from .text import normalize, timestamp
+    from .vision import action_pixel_count, ocr_image, row_name_like, text_rows_for_table
 
 
 @dataclass(frozen=True)
@@ -28,15 +43,16 @@ class UpgradeTargetDetection:
     targets: list[Candidate]
 
 
-def detect_upgrade_targets(image: Image.Image) -> UpgradeTargetDetection:
+def detect_upgrade_targets(image: Image.Image, debug: bool = False) -> UpgradeTargetDetection:
     image = image.convert("RGB")
     texts = ocr_image(image)
     vertices = detect_inventory_vertices(image)
-    windows = assign_window_titles(assemble_window_rectangles(vertices), texts)
+    rectangles = assemble_window_rectangles(vertices)
+    windows = assign_window_titles(rectangles, texts)
     tables = window_tables(windows, texts)
     target_tables = other_container_tables(windows, texts)
     targets = find_upgrade_targets(image, texts, target_tables)
-    return UpgradeTargetDetection(
+    detection = UpgradeTargetDetection(
         image=image,
         texts=texts,
         windows=windows,
@@ -44,6 +60,75 @@ def detect_upgrade_targets(image: Image.Image) -> UpgradeTargetDetection:
         target_tables=target_tables,
         targets=targets,
     )
+    if debug:
+        print_detection_debug(detection, vertices)
+    return detection
+
+
+def print_detection_debug(detection: UpgradeTargetDetection, vertices: list[object]) -> None:
+    print("== upgrade target detection ==")
+    print(f"image: {detection.image.size[0]}x{detection.image.size[1]}")
+    print(f"ocr texts: {len(detection.texts)}")
+    print(f"vertices: {len(vertices)}")
+
+    vertex_counts: dict[str, int] = {}
+    for vertex in vertices:
+        kind = getattr(vertex, "kind", "unknown")
+        vertex_counts[kind] = vertex_counts.get(kind, 0) + 1
+    for kind, count in sorted(vertex_counts.items()):
+        print(f"  vertex {kind}: {count}")
+    for index, vertex in enumerate(vertices, start=1):
+        kind = getattr(vertex, "kind", "unknown")
+        score = getattr(vertex, "score", 0.0)
+        x1 = getattr(vertex, "x1", 0)
+        y1 = getattr(vertex, "y1", 0)
+        x2 = getattr(vertex, "x2", 0)
+        y2 = getattr(vertex, "y2", 0)
+        print(f"  vertex {index}: kind={kind} box=({x1},{y1})-({x2},{y2}) score={score:.3f}")
+
+    headers = [text for text in detection.texts if normalize(text.text) == "name"]
+    print(f"name headers: {len(headers)}")
+    for index, header in enumerate(sorted(headers, key=lambda item: (item.cy, item.x1)), start=1):
+        print(
+            f"  name header {index}: box=({header.x1},{header.y1})-({header.x2},{header.y2}) "
+            f"center=({header.cx},{header.cy}) score={header.score:.2f}"
+        )
+
+    print(f"windows: {len(detection.windows)}")
+    if not detection.windows and vertices:
+        print("  no windows assembled from vertices")
+    for index, window in enumerate(detection.windows, start=1):
+        title = window.title.strip() or "<no title>"
+        print(
+            f"  window {index}: group={window.group} title={title!r} "
+            f"box=({window.x1},{window.y1})-({window.x2},{window.y2}) score={window.score:.3f}"
+        )
+
+    print(f"tables: {len(detection.tables)}")
+    for index, table in enumerate(detection.tables, start=1):
+        rows = text_rows_for_table(detection.texts, table)
+        print(
+            f"  table {index}: title={table.title!r} box=({table.x1},{table.y1})-({table.x2},{table.y2}) "
+            f"header_y={table.header_y} rows={len(rows)}"
+        )
+        for row in rows:
+            pixels = action_pixel_count(detection.image, table, row.cy)
+            keep = table in detection.target_tables and row_name_like(row.text) and pixels >= MIN_ACTION_PIXELS
+            print(
+                f"    row y={row.cy:<4} x=({row.x1},{row.x2}) pixels={pixels:<4} "
+                f"keep={str(keep):<5} text={row.text!r}"
+            )
+
+    print(f"target tables: {len(detection.target_tables)}")
+    for index, table in enumerate(detection.target_tables, start=1):
+        print(f"  target table {index}: {table.title!r}")
+
+    print(f"targets: {len(detection.targets)}")
+    for index, target in enumerate(detection.targets, start=1):
+        print(
+            f"  target {index}: table={target.table.title!r} name={target.name!r} "
+            f"click=({target.click_x},{target.click_y}) pixels={target.action_pixels}"
+        )
 
 
 def window_tables(windows: list[WindowRectangle], texts: list[OcrText]) -> list[Table]:
@@ -203,3 +288,22 @@ def _font():
         return ImageFont.truetype("DejaVuSans.ttf", 13)
     except OSError:
         return ImageFont.load_default()
+
+
+def main() -> None:
+    import sxtemp1
+
+    image = sxtemp1.screenshot()
+    detection = detect_upgrade_targets(image, debug=True)
+    output = save_upgrade_target_overlay(detection)
+    print(f"Windows found: {len(detection.windows)}")
+    print(f"Tables found: {len(detection.tables)}")
+    print(f"Target tables found: {len(detection.target_tables)}")
+    print(f"Upgrade targets found: {len(detection.targets)}")
+    for index, target in enumerate(detection.targets, start=1):
+        print(f"{index}. {target.table.title}: {target.name} at ({target.click_x}, {target.click_y}) with {target.action_pixels} action pixels")
+    print(f"Overlay saved: {output}")
+
+
+if __name__ == "__main__":
+    main()

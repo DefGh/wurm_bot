@@ -27,7 +27,7 @@ WINDOW_GROUP_COLORS = {
     WINDOW_GROUP_OTHER: "yellow",
 }
 TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "inventory_templates"
-MATCH_STRICTNESS = 0.99
+MATCH_STRICTNESS = 0.98
 TEMPLATE_SCALE = 0.5
 TOP_LINE_TOLERANCE = 10
 RIGHT_EDGE_TOLERANCE = 24

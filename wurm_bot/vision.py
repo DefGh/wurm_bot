@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-import cv2
 import numpy as np
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
@@ -149,18 +148,19 @@ def row_name_like(text: str) -> bool:
 
 def action_pixel_count(image: Image.Image, table: Table, y: int) -> int:
     arr = np.array(image.convert("RGB"))
-    patch_x1 = max(table.x1, table.x2 - 48)
-    patch_x2 = min(table.x2, patch_x1 + 46)
-    patch_y1 = max(table.y1, y - 10)
-    patch_y2 = min(table.y2, y + 11)
+    patch_x1 = max(table.x1, table.x2 - 26)
+    patch_x2 = min(table.x2, table.x2 - 18)
+    patch_y1 = max(table.y1, y - 8)
+    patch_y2 = min(table.y2, y + 9)
     patch = arr[patch_y1:patch_y2, patch_x1:patch_x2]
     if patch.size == 0:
         return 0
 
-    hsv = cv2.cvtColor(patch, cv2.COLOR_RGB2HSV)
-    val = hsv[:, :, 2]
-    channel_range = patch.max(axis=2) - patch.min(axis=2)
-    return int(np.count_nonzero((channel_range > 18) & (val > 45)))
+    sample_y = patch.shape[0] // 2
+    sample = patch[max(0, sample_y - 1) : min(patch.shape[0], sample_y + 2), 0:3]
+    background = np.median(sample.reshape(-1, 3), axis=0)
+    diff = np.abs(patch.astype(np.int16) - background.astype(np.int16)).max(axis=2)
+    return int(np.count_nonzero(diff > 18))
 
 
 def text_rows_for_table(texts: list[OcrText], table: Table) -> list[OcrText]:
@@ -171,8 +171,6 @@ def text_rows_for_table(texts: list[OcrText], table: Table) -> list[OcrText]:
         if not (table.x1 <= item.cx <= table.x2 and table.y1 <= item.cy <= table.y2):
             continue
         if item.x1 >= table.ql_x1 - 22:
-            continue
-        if item.x1 < table.name_x1 - 20:
             continue
         if not row_name_like(item.text):
             continue
@@ -228,10 +226,17 @@ def find_log_rows(texts: list[OcrText], tables: list[Table]) -> list[OcrText]:
                 continue
             if not (table.x1 <= row.cx <= table.x2 and table.y1 <= row.cy <= table.y2):
                 continue
-            if "log" in normalize(row.text):
+            if text_is_log_row(row.text):
                 rows.append(row)
     return sorted(rows, key=lambda item: item.cy)
 
 
 def is_log_active(texts: list[OcrText]) -> bool:
-    return any("activated:" in normalize(item.text) and "log" in normalize(item.text) for item in texts)
+    return any("activated:" in normalize(item.text) and text_is_log_row(item.text) for item in texts)
+
+
+def text_is_log_row(text: str) -> bool:
+    cleaned = normalize(text)
+    compact = cleaned.replace(" ", "").replace(",", "")
+    compact = compact.replace("0", "o").replace("1", "l").replace("|", "l")
+    return "log" in compact

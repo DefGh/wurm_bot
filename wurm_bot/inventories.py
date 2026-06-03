@@ -3,15 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import sys
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .config import SCREENS_DIR
-from .models import OcrText, Table
-from .text import normalize, timestamp
-from .vision import ocr_image
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from wurm_bot.config import SCREENS_DIR
+    from wurm_bot.models import OcrText, Table
+    from wurm_bot.text import normalize, timestamp
+    from wurm_bot.vision import ocr_image
+else:
+    from .config import SCREENS_DIR
+    from .models import OcrText, Table
+    from .text import normalize, timestamp
+    from .vision import ocr_image
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "inventory_templates"
@@ -412,3 +420,20 @@ def _font():
         return ImageFont.truetype("DejaVuSans.ttf", 14)
     except OSError:
         return ImageFont.load_default()
+
+
+def main() -> None:
+    import sxtemp1
+
+    image = sxtemp1.screenshot()
+    detection = detect_inventories(image)
+    output = save_inventory_overlay(detection)
+    print(f"Inventories found: {len(detection.inventories)}")
+    for index, inventory in enumerate(detection.inventories, start=1):
+        title = inventory.title.strip() or "inventory"
+        print(f"{index}. {title}: ({inventory.x1}, {inventory.y1})-({inventory.x2}, {inventory.y2})")
+    print(f"Overlay saved: {output}")
+
+
+if __name__ == "__main__":
+    main()
