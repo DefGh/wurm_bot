@@ -117,7 +117,6 @@ def is_relevant_event(line: str) -> bool:
     markers = (
         "you improve",
         "you damage",
-        "you start",
         "could be improved with a log",
         "could be improved with a lump",
         "too low quality",
