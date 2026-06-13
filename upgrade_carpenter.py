@@ -22,7 +22,7 @@ from wurm_bot.events import (
     event_too_far_away,
 )
 from wurm_bot.models import Candidate, candidate_action_point
-from wurm_bot.vitals import format_vitals, read_vitals, sample_summary, save_vitals_diagnostic
+from wurm_bot.vitals import format_vitals, read_vitals, run_vitals_overlay, sample_summary, save_vitals_diagnostic
 from wurm_bot.vision import find_log_rows, is_log_active, scan
 from wurm_bot.windows import click_wurm_local, double_click_wurm_local, move_wurm_local, press, screen_to_wurm_local
 
@@ -298,6 +298,10 @@ def diagnose_vitals() -> None:
     print(f"Saved vitals diagnostic: {path}")
 
 
+def show_vitals_overlay() -> None:
+    run_vitals_overlay()
+
+
 def diagnose_windows() -> None:
     if sxtemp1.sys.platform != "darwin":
         raise RuntimeError("--diagnose-windows is only supported on macOS")
@@ -330,11 +334,14 @@ def main() -> None:
     parser.add_argument("--diagnose-window", action="store_true", help="Save a screenshot of the detected Wurm window and print its region.")
     parser.add_argument("--diagnose-windows", action="store_true", help="Print visible macOS windows used for Wurm window matching.")
     parser.add_argument("--diagnose-vitals", action="store_true", help="Print HUD vital pixel statuses and save a diagnostic screenshot.")
+    parser.add_argument("--vitals-overlay", action="store_true", help="Show a live always-on-top vitals overlay window.")
     args = parser.parse_args()
 
     clean_screenshot_history()
 
-    if args.diagnose_windows:
+    if args.vitals_overlay:
+        show_vitals_overlay()
+    elif args.diagnose_windows:
         diagnose_windows()
     elif args.diagnose_vitals:
         diagnose_vitals()

@@ -60,6 +60,19 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(f"{name} must be an integer, got {raw_value!r}") from error
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    value = raw_value.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be a boolean, got {raw_value!r}")
+
+
 def _env_line(name: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
     raw_value = os.environ.get(name)
     if raw_value is None:
@@ -113,6 +126,11 @@ VITALS_STAMINA_MIN_FILLED = _env_float("WURM_STAMINA_MIN_FILLED", 100.0)
 VITALS_WATER_MIN_FILLED = _env_float("WURM_WATER_MIN_FILLED", 70.0)
 VITALS_FOOD_MIN_FILLED = _env_float("WURM_FOOD_MIN_FILLED", 70.0)
 VITALS_POLL_SECONDS = _env_float("WURM_VITALS_POLL_SECONDS", 1.0)
+VITALS_OVERLAY_WIDTH = _env_int("WURM_VITALS_OVERLAY_WIDTH", 320)
+VITALS_OVERLAY_HEIGHT = _env_int("WURM_VITALS_OVERLAY_HEIGHT", 118)
+VITALS_OVERLAY_OFFSET_X = _env_int("WURM_VITALS_OVERLAY_OFFSET_X", 16)
+VITALS_OVERLAY_OFFSET_Y = _env_int("WURM_VITALS_OVERLAY_OFFSET_Y", 16)
+VITALS_OVERLAY_TOPMOST = _env_bool("WURM_VITALS_OVERLAY_TOPMOST", True)
 
 
 def _default_logs_dir() -> Path:

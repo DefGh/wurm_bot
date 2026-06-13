@@ -16,6 +16,55 @@ from types import SimpleNamespace
 
 sys.modules.setdefault("mouseinfo", SimpleNamespace(MouseInfoWindow=lambda: None))
 
+
+def prepare_xauthority_for_pyautogui() -> None:
+    if sys.platform == "darwin" or not os.environ.get("DISPLAY"):
+        return
+
+    source = os.environ.get("XAUTHORITY")
+    if not source or not Path(source).exists() or os.environ.get("WURM_SKIP_XAUTH_FIX") == "1":
+        return
+
+    display = os.environ["DISPLAY"]
+    if display.startswith(":"):
+        display_number = display[1:].split(".", 1)[0]
+    else:
+        display_number = display.rsplit(":", 1)[-1].split(".", 1)[0]
+    if not display_number.isdigit():
+        return
+
+    try:
+        result = subprocess.run(["xauth", "-f", source, "list"], check=True, capture_output=True, text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return
+
+    cookie = None
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "MIT-MAGIC-COOKIE-1":
+            cookie = parts[2]
+            break
+    if not cookie:
+        return
+
+    fixed_xauthority = Path(tempfile.gettempdir()) / f"wurm-bot-xauthority-{os.getuid()}-{display_number}"
+    fixed_xauthority.touch(mode=0o600, exist_ok=True)
+    target = f"{os.uname().nodename}/unix:{display_number}"
+    try:
+        subprocess.run(
+            ["xauth", "-f", str(fixed_xauthority), "add", target, "MIT-MAGIC-COOKIE-1", cookie],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return
+
+    os.environ["XAUTHORITY"] = str(fixed_xauthority)
+
+
+prepare_xauthority_for_pyautogui()
+
 import pyautogui
 import pyscreeze
 from PIL import Image
@@ -595,20 +644,25 @@ def find_wurm_region_x11() -> tuple[int, int, int, int]:
         ) from exc
 
     candidates = []
+    match_text = window_match_text().lower()
+    exclude_terms = window_exclude_terms()
     pattern = re.compile(
-        r"^\s+(0x[0-9a-f]+).*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)\s+\+(-?\d+)\+(-?\d+)",
+        r'^\s+(0x[0-9a-f]+)\s+(?:"([^"]*)")?:?.*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)\s+\+(-?\d+)\+(-?\d+)',
         re.IGNORECASE,
     )
 
     for line in result.stdout.splitlines():
-        if "wurm" not in line.lower():
+        line_lower = line.lower()
+        if match_text not in line_lower:
+            continue
+        if any(term in line_lower for term in exclude_terms):
             continue
 
         match = pattern.search(line)
         if not match:
             continue
 
-        window_id, width, height, _x, _y, abs_x, abs_y = match.groups()
+        window_id, title, width, height, _x, _y, abs_x, abs_y = match.groups()
         width = int(width)
         height = int(height)
         abs_x = int(abs_x)
@@ -617,12 +671,20 @@ def find_wurm_region_x11() -> tuple[int, int, int, int]:
         if width < 300 or height < 300:
             continue
 
-        candidates.append((width * height, window_id, abs_x, abs_y, width, height))
+        title_lower = (title or "").lower()
+        is_exact_client_title = match_text in title_lower
+        is_frame = "mutter-x11-frames" in line_lower
+        score = (
+            2 if is_exact_client_title else 0,
+            0 if is_frame else 1,
+            width * height,
+        )
+        candidates.append((score, window_id, abs_x, abs_y, width, height))
 
     if not candidates:
         raise RuntimeError("Wurm window was not found")
 
-    _area, _window_id, x, y, width, height = max(candidates)
+    _score, _window_id, x, y, width, height = max(candidates)
     return x, y, width, height
 
 

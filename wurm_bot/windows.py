@@ -56,9 +56,20 @@ def find_wurm_click_region() -> tuple[int, int, int, int]:
     return sxtemp1.find_wurm_region()
 
 
-def click_wurm_local(x: int, y: int, clicks: int = 1) -> None:
+def click_wurm_local(x: int, y: int, clicks: int = 1, button: str = "left") -> None:
     offset_x, offset_y, _width, _height = find_wurm_click_region()
-    sxtemp1.pyautogui.click(offset_x + x, offset_y + y, clicks=clicks, interval=0.08)
+    sxtemp1.pyautogui.click(offset_x + x, offset_y + y, clicks=clicks, interval=0.08, button=button)
+
+
+def left_click_wurm_local(x: int, y: int, hold: float = 0.06) -> None:
+    offset_x, offset_y, _width, _height = find_wurm_click_region()
+    screen_x = offset_x + x
+    screen_y = offset_y + y
+    sxtemp1.pyautogui.moveTo(screen_x, screen_y, duration=0.05)
+    sxtemp1.pyautogui.sleep(0.05)
+    sxtemp1.pyautogui.mouseDown(screen_x, screen_y, button="left")
+    sxtemp1.pyautogui.sleep(hold)
+    sxtemp1.pyautogui.mouseUp(screen_x, screen_y, button="left")
 
 
 def double_click_wurm_local(x: int, y: int, interval: float = 0.10) -> None:

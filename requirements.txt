@@ -5,3 +5,4 @@ mss
 numpy
 opencv-python
 rapidocr-onnxruntime
+pipewire-capture

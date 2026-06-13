@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -12,6 +13,12 @@ from .config import (
     VITALS_FOOD_EMPTY_RGB,
     VITALS_FOOD_LINE,
     VITALS_FOOD_MIN_FILLED,
+    VITALS_OVERLAY_HEIGHT,
+    VITALS_OVERLAY_OFFSET_X,
+    VITALS_OVERLAY_OFFSET_Y,
+    VITALS_OVERLAY_TOPMOST,
+    VITALS_OVERLAY_WIDTH,
+    VITALS_POLL_SECONDS,
     VITALS_SAMPLE_COUNT,
     VITALS_STAMINA_LINE,
     VITALS_STAMINA_MIN_FILLED,
@@ -149,6 +156,106 @@ def sample_summary(check: VitalCheck) -> str:
     return f"{label}={check.matched_count}/{check.sample_count}"
 
 
+def render_vitals_overlay(vitals: Vitals | None, message: str | None = None) -> Image.Image:
+    width = max(240, VITALS_OVERLAY_WIDTH)
+    height = max(90, VITALS_OVERLAY_HEIGHT)
+    out = Image.new("RGB", (width, height), (16, 18, 20))
+    draw = ImageDraw.Draw(out)
+    font = _font()
+    title_font = _font(14)
+
+    draw.rectangle((0, 0, width - 1, height - 1), outline=(62, 68, 75), width=1)
+    draw.text((12, 8), "Wurm vitals", fill=(235, 238, 242), font=title_font)
+
+    if message:
+        draw.text((12, 38), message[:60], fill=(255, 190, 90), font=font)
+        return out
+
+    if vitals is None:
+        draw.text((12, 38), "waiting for screenshot...", fill=(180, 186, 194), font=font)
+        return out
+
+    bar_x = 86
+    bar_w = width - bar_x - 16
+    y = 34
+    for check in (vitals.stamina, vitals.water, vitals.food):
+        _draw_overlay_bar(draw, font, check, bar_x, y, bar_w)
+        y += 26
+
+    return out
+
+
+def run_vitals_overlay() -> None:
+    try:
+        import cv2
+    except ImportError as error:
+        raise RuntimeError("Vitals overlay requires opencv-python.") from error
+
+    import sxtemp1
+
+    window_name = "Wurm vitals"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, VITALS_OVERLAY_WIDTH, VITALS_OVERLAY_HEIGHT)
+    _place_overlay_window(cv2, window_name, sxtemp1)
+    if VITALS_OVERLAY_TOPMOST and hasattr(cv2, "WND_PROP_TOPMOST"):
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
+
+    print("Vitals overlay is running. Press q or Esc in the overlay window to close.")
+    last_place = 0.0
+    while True:
+        now = time.monotonic()
+        if now - last_place >= 5.0:
+            _place_overlay_window(cv2, window_name, sxtemp1)
+            last_place = now
+
+        try:
+            image = sxtemp1.screenshot()
+            frame = render_vitals_overlay(read_vitals(image))
+        except Exception as error:
+            frame = render_vitals_overlay(None, str(error))
+
+        cv2.imshow(window_name, _pil_to_bgr(frame))
+        key = cv2.waitKey(max(50, int(VITALS_POLL_SECONDS * 1000))) & 0xFF
+        if key in {27, ord("q")}:
+            break
+
+    cv2.destroyWindow(window_name)
+
+
+def _draw_overlay_bar(
+    draw: ImageDraw.ImageDraw,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
+    check: VitalCheck,
+    x: int,
+    y: int,
+    width: int,
+) -> None:
+    label = check.name.upper()
+    percent = max(0, min(100, check.filled_percent))
+    fill_width = round(width * percent / 100)
+    color = (92, 205, 120) if check.ok else (235, 82, 82)
+    label_color = (215, 220, 226)
+    text = f"{percent}% {check.status}"
+
+    draw.text((12, y + 2), label, fill=label_color, font=font)
+    draw.rectangle((x, y, x + width, y + 15), fill=(39, 43, 48), outline=(82, 88, 95), width=1)
+    if fill_width > 0:
+        draw.rectangle((x + 1, y + 1, x + fill_width - 1, y + 14), fill=color)
+    draw.text((x + 6, y + 1), text, fill=(245, 247, 250), font=font)
+
+
+def _place_overlay_window(cv2, window_name: str, sxtemp1_module) -> None:
+    try:
+        x, y, _width, _height = sxtemp1_module.find_wurm_region()
+    except Exception:
+        return
+    cv2.moveWindow(window_name, x + VITALS_OVERLAY_OFFSET_X, y + VITALS_OVERLAY_OFFSET_Y)
+
+
+def _pil_to_bgr(image: Image.Image) -> np.ndarray:
+    return np.array(image.convert("RGB"))[:, :, ::-1]
+
+
 def _draw_label_panel(
     draw: ImageDraw.ImageDraw,
     font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
@@ -240,8 +347,8 @@ def rgb_close(rgb: tuple[int, int, int], target_rgb: tuple[int, int, int]) -> bo
     return max(abs(value - target) for value, target in zip(rgb, target_rgb, strict=True)) <= VITALS_COLOR_TOLERANCE
 
 
-def _font():
+def _font(size: int = 13):
     try:
-        return ImageFont.truetype("DejaVuSans.ttf", 13)
+        return ImageFont.truetype("DejaVuSans.ttf", size)
     except OSError:
         return ImageFont.load_default()
