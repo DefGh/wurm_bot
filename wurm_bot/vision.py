@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 
 import numpy as np
@@ -217,7 +218,11 @@ def dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
     return unique
 
 
-def find_log_rows(texts: list[OcrText], tables: list[Table]) -> list[OcrText]:
+def find_inventory_rows(
+    texts: list[OcrText],
+    tables: list[Table],
+    predicate: Callable[[str], bool],
+) -> list[OcrText]:
     inventory_tables = [table for table in tables if table_is_inventory(table)]
     rows: list[OcrText] = []
     for table in inventory_tables:
@@ -226,13 +231,21 @@ def find_log_rows(texts: list[OcrText], tables: list[Table]) -> list[OcrText]:
                 continue
             if not (table.x1 <= row.cx <= table.x2 and table.y1 <= row.cy <= table.y2):
                 continue
-            if text_is_log_row(row.text):
+            if predicate(row.text):
                 rows.append(row)
     return sorted(rows, key=lambda item: item.cy)
 
 
+def find_log_rows(texts: list[OcrText], tables: list[Table]) -> list[OcrText]:
+    return find_inventory_rows(texts, tables, text_is_log_row)
+
+
+def is_inventory_item_active(texts: list[OcrText], predicate: Callable[[str], bool]) -> bool:
+    return any("activated:" in normalize(item.text) and predicate(item.text) for item in texts)
+
+
 def is_log_active(texts: list[OcrText]) -> bool:
-    return any("activated:" in normalize(item.text) and text_is_log_row(item.text) for item in texts)
+    return is_inventory_item_active(texts, text_is_log_row)
 
 
 def text_is_log_row(text: str) -> bool:

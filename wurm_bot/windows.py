@@ -86,6 +86,12 @@ def move_wurm_local(x: int, y: int) -> None:
     sxtemp1.pyautogui.moveTo(offset_x + x, offset_y + y)
 
 
+def drag_wurm_local(x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> None:
+    offset_x, offset_y, _width, _height = find_wurm_click_region()
+    sxtemp1.pyautogui.moveTo(offset_x + x1, offset_y + y1, duration=0.05)
+    sxtemp1.pyautogui.dragTo(offset_x + x2, offset_y + y2, duration=duration, button="left")
+
+
 def screen_to_wurm_local(x: int, y: int) -> tuple[int, int]:
     offset_x, offset_y, _width, _height = find_wurm_click_region()
     return x - offset_x, y - offset_y

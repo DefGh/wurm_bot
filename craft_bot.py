@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import re
 import time
 
-import numpy as np
 from PIL import ImageDraw
 import sxtemp1
 
@@ -13,7 +12,7 @@ from wurm_bot.config import ACTION_TIMEOUT, LOGS_DIR, SCREENS_DIR, VITALS_POLL_S
 from wurm_bot.events import EventLogTail, SkillGain, SkillLogTail
 from wurm_bot.models import OcrText
 from wurm_bot.text import normalize, timestamp
-from wurm_bot.vitals import Vitals, format_vitals, read_vitals, render_vitals_overlay, sample_summary, save_vitals_diagnostic
+from wurm_bot.vitals import Vitals, VitalsPixelOverlay, format_vitals, read_vitals, sample_summary, save_vitals_diagnostic
 from wurm_bot.vision import ocr_image
 from wurm_bot.windows import left_click_wurm_local, press
 
@@ -91,34 +90,34 @@ class CraftResult:
 class VitalsOverlay:
     def __init__(self, enabled: bool):
         self.enabled = enabled
-        self.cv2 = None
-        self.window_name = "Wurm craft vitals"
+        self.overlay: VitalsPixelOverlay | None = None
         if not enabled:
             return
 
         try:
-            import cv2
-        except ImportError:
-            print("Vitals overlay disabled: opencv-python is not available.")
+            self.overlay = VitalsPixelOverlay("Wurm craft vitals frames")
+        except RuntimeError as error:
+            print(f"Vitals overlay disabled: {error}")
             self.enabled = False
             return
 
-        self.cv2 = cv2
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window_name, 320, 118)
+        print(f"Vitals overlay enabled: {self.overlay.backend_name}")
         self.update(None, "waiting for vitals...")
 
+    def before_screenshot(self) -> None:
+        # The frame overlay avoids the sampled pixels, so it can stay visible
+        # during screenshots without polluting vitals reads.
+        return
+
     def update(self, vitals: Vitals | None, message: str | None = None) -> None:
-        if not self.enabled or self.cv2 is None:
+        if not self.enabled or self.overlay is None:
             return
 
-        frame = render_vitals_overlay(vitals, message)
-        self.cv2.imshow(self.window_name, np.array(frame.convert("RGB"))[:, :, ::-1])
-        self.cv2.waitKey(1)
+        self.overlay.update_for_wurm(vitals, message)
 
     def close(self) -> None:
-        if self.enabled and self.cv2 is not None:
-            self.cv2.destroyWindow(self.window_name)
+        if self.enabled and self.overlay is not None:
+            self.overlay.close()
 
 
 def click_or_press_create(
@@ -254,6 +253,7 @@ def wait_for_craft_result(log_tail: EventLogTail, timeout: int = ACTION_TIMEOUT)
 def ensure_vitals_ready(overlay: VitalsOverlay) -> None:
     last_wait_print = 0.0
     while True:
+        overlay.before_screenshot()
         image = sxtemp1.screenshot()
         vitals = read_vitals(image)
         overlay.update(vitals)

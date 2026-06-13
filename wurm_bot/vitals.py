@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 import time
 
 import numpy as np
@@ -14,6 +15,7 @@ from .config import (
     VITALS_FOOD_LINE,
     VITALS_FOOD_MIN_FILLED,
     VITALS_OVERLAY_HEIGHT,
+    VITALS_OVERLAY_MARKER_SIZE,
     VITALS_OVERLAY_OFFSET_X,
     VITALS_OVERLAY_OFFSET_Y,
     VITALS_OVERLAY_TOPMOST,
@@ -34,6 +36,27 @@ class VitalSample:
     point: tuple[int, int]
     rgb: tuple[int, int, int]
     matched: bool
+
+
+@dataclass(frozen=True)
+class VitalOverlaySample:
+    point: tuple[int, int]
+    ok: bool
+
+
+@dataclass(frozen=True)
+class VitalOverlayFrame:
+    line: tuple[int, int, int]
+    samples: list[VitalOverlaySample]
+
+
+@dataclass(frozen=True)
+class VitalOverlaySegment:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    ok: bool
 
 
 @dataclass(frozen=True)
@@ -74,6 +97,466 @@ class Vitals:
     @property
     def blocking_checks(self) -> list[VitalCheck]:
         return [check for check in (self.water, self.food) if not check.ok]
+
+
+class VitalsPixelOverlay:
+    def __init__(self, title: str = "Wurm vitals pixels", marker_size: int | None = None):
+        try:
+            self._backend = _MacOSVitalsPixelOverlay(title, marker_size) if sys.platform == "darwin" else None
+        except RuntimeError:
+            self._backend = None
+
+        if self._backend is None:
+            self._backend = _TkVitalsPixelOverlay(title, marker_size)
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend.backend_name
+
+    @property
+    def closed(self) -> bool:
+        return self._backend.closed
+
+    def update_for_wurm(self, vitals: Vitals | None, message: str | None = None) -> None:
+        self._backend.update_for_wurm(vitals, message)
+
+    def update(
+        self,
+        vitals: Vitals | None,
+        region: tuple[int, int, int, int] | None,
+        message: str | None = None,
+    ) -> None:
+        self._backend.update(vitals, region, message)
+
+    def hide(self) -> None:
+        self._backend.hide()
+
+    def close(self) -> None:
+        self._backend.close()
+
+
+class _MacOSVitalsPixelOverlay:
+    backend_name = "macos-native"
+
+    def __init__(self, title: str = "Wurm vitals pixels", marker_size: int | None = None):
+        try:
+            import AppKit
+            from Foundation import NSDate, NSRunLoop, NSString
+            import objc
+        except Exception as error:
+            raise RuntimeError("macOS native vitals overlay requires PyObjC AppKit.") from error
+
+        self.AppKit = AppKit
+        self.NSDate = NSDate
+        self.NSRunLoop = NSRunLoop
+        self.NSString = NSString
+        self.objc = objc
+        self.title = title
+        self.marker_size = marker_size if marker_size is not None else VITALS_OVERLAY_MARKER_SIZE
+        if self.marker_size < 1:
+            raise RuntimeError("WURM_VITALS_OVERLAY_MARKER_SIZE must be at least 1")
+
+        self.closed = False
+        self.window = None
+        self.view = None
+        self._view_class = self._make_view_class()
+
+        self.app = AppKit.NSApplication.sharedApplication()
+        activation_policy = getattr(AppKit, "NSApplicationActivationPolicyAccessory", None)
+        if activation_policy is not None:
+            self.app.setActivationPolicy_(self._constant(activation_policy))
+
+    def update_for_wurm(self, vitals: Vitals | None, message: str | None = None) -> None:
+        try:
+            import sxtemp1
+
+            region = sxtemp1.find_wurm_region()
+        except Exception as error:
+            self.update(None, None, message or str(error))
+            return
+
+        self.update(vitals, region, message)
+
+    def update(
+        self,
+        vitals: Vitals | None,
+        region: tuple[int, int, int, int] | None,
+        message: str | None = None,
+    ) -> None:
+        if self.closed:
+            return
+        if region is None:
+            self.hide()
+            self._pump()
+            return
+
+        if message or vitals is None:
+            frames: list[VitalOverlayFrame] = []
+            status = message or "waiting for vitals..."
+        else:
+            frames = overlay_frames(vitals)
+            status = None
+
+        x, y, width, height = region
+        self._ensure_window(width, height)
+        self._move_window(x, y, width, height)
+        self.view.setOverlayState_markerSize_message_(frames, self.marker_size, status)
+        self.view.setNeedsDisplay_(True)
+        self.view.displayIfNeeded()
+        self.window.orderFrontRegardless()
+        self._pump()
+
+    def hide(self) -> None:
+        if self.window is not None:
+            self.window.orderOut_(None)
+        self._pump()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.window is not None:
+            self.window.orderOut_(None)
+            self.window.close()
+            self.window = None
+            self.view = None
+        self._pump()
+
+    def _ensure_window(self, width: int, height: int) -> None:
+        AppKit = self.AppKit
+        if self.window is None:
+            frame = AppKit.NSMakeRect(0, 0, width, height)
+            style = getattr(AppKit, "NSWindowStyleMaskBorderless", None)
+            if style is None:
+                style = getattr(AppKit, "NSBorderlessWindowMask")
+            backing = getattr(AppKit, "NSBackingStoreBuffered")
+            self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                frame,
+                self._constant(style),
+                self._constant(backing),
+                False,
+            )
+            self.window.setTitle_(self.title)
+            self.window.setOpaque_(False)
+            self.window.setBackgroundColor_(AppKit.NSColor.clearColor())
+            self.window.setIgnoresMouseEvents_(True)
+            self.window.setHasShadow_(False)
+            self._configure_window_level()
+            self.view = self._view_class.alloc().initWithFrame_(frame)
+            self.window.setContentView_(self.view)
+            return
+
+        content_size = self.window.contentView().frame().size
+        if int(content_size.width) == width and int(content_size.height) == height:
+            return
+
+        frame = AppKit.NSMakeRect(0, 0, width, height)
+        self.view.setFrame_(frame)
+
+    def _move_window(self, x: int, y: int, width: int, height: int) -> None:
+        AppKit = self.AppKit
+        appkit_y = self._top_left_to_appkit_y(y, height)
+        self.window.setFrame_display_(AppKit.NSMakeRect(x, appkit_y, width, height), True)
+
+    def _top_left_to_appkit_y(self, y: int, height: int) -> int:
+        screens = self.AppKit.NSScreen.screens()
+        screen_top = max(screen.frame().origin.y + screen.frame().size.height for screen in screens)
+        return round(screen_top - y - height)
+
+    def _configure_window_level(self) -> None:
+        AppKit = self.AppKit
+        level = getattr(AppKit, "NSScreenSaverWindowLevel", None)
+        if level is None:
+            level = getattr(AppKit, "NSStatusWindowLevel", 25)
+        if VITALS_OVERLAY_TOPMOST:
+            self.window.setLevel_(self._constant(level))
+
+        behavior = 0
+        for name in (
+            "NSWindowCollectionBehaviorCanJoinAllSpaces",
+            "NSWindowCollectionBehaviorFullScreenAuxiliary",
+            "NSWindowCollectionBehaviorStationary",
+            "NSWindowCollectionBehaviorIgnoresCycle",
+        ):
+            behavior |= self._constant(getattr(AppKit, name, 0))
+        if behavior:
+            self.window.setCollectionBehavior_(behavior)
+
+    def _make_view_class(self):
+        AppKit = self.AppKit
+        NSString = self.NSString
+        objc = self.objc
+
+        class VitalsOverlayView(AppKit.NSView):
+            def initWithFrame_(self, frame):
+                self = objc.super(VitalsOverlayView, self).initWithFrame_(frame)
+                if self is None:
+                    return None
+                self.frames = []
+                self.marker_size = 7
+                self.message = None
+                return self
+
+            def isOpaque(self):
+                return False
+
+            def setOverlayState_markerSize_message_(self, frames, marker_size, message):
+                self.frames = list(frames)
+                self.marker_size = marker_size
+                self.message = message
+
+            def drawRect_(self, rect):
+                bounds = self.bounds()
+                height = bounds.size.height
+                if self.message:
+                    AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.06, 0.07, 0.08, 0.82).set()
+                    AppKit.NSBezierPath.fillRect_(AppKit.NSMakeRect(12, height - 38, min(720, bounds.size.width - 24), 26))
+                    attributes = {
+                        AppKit.NSForegroundColorAttributeName: AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                            1.0, 0.75, 0.35, 1.0
+                        ),
+                        AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(13),
+                    }
+                    NSString.stringWithString_(str(self.message[:120])).drawAtPoint_withAttributes_(
+                        AppKit.NSMakePoint(20, height - 31),
+                        attributes,
+                    )
+                    return
+
+                for frame in self.frames:
+                    for segment in overlay_frame_segments(frame, self.marker_size):
+                        if segment.ok:
+                            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 1.0, 0.0, 0.95).set()
+                        else:
+                            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.0, 0.0, 0.95).set()
+                        AppKit.NSBezierPath.fillRect_(
+                            AppKit.NSMakeRect(
+                                segment.x1,
+                                height - segment.y2,
+                                segment.x2 - segment.x1,
+                                segment.y2 - segment.y1,
+                            )
+                        )
+
+        return VitalsOverlayView
+
+    def _constant(self, value):
+        return value() if callable(value) else value
+
+    def _pump(self) -> None:
+        self.NSRunLoop.currentRunLoop().runUntilDate_(self.NSDate.dateWithTimeIntervalSinceNow_(0.001))
+
+
+class _TkVitalsPixelOverlay:
+    backend_name = "tk"
+
+    def __init__(self, title: str = "Wurm vitals pixels", marker_size: int | None = None):
+        try:
+            import tkinter as tk
+        except ImportError as error:
+            raise RuntimeError("Vitals pixel overlay requires tkinter.") from error
+
+        self.tk = tk
+        self.title = title
+        self.marker_size = marker_size if marker_size is not None else VITALS_OVERLAY_MARKER_SIZE
+        if self.marker_size < 1:
+            raise RuntimeError("WURM_VITALS_OVERLAY_MARKER_SIZE must be at least 1")
+
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.root.title(title)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Escape>", lambda _event: self.close())
+        self.root.bind("q", lambda _event: self.close())
+
+        self.closed = False
+        self._segments: list[object] = []
+        self._message_window = None
+        self._message_label = None
+
+    def update_for_wurm(self, vitals: Vitals | None, message: str | None = None) -> None:
+        try:
+            import sxtemp1
+
+            region = sxtemp1.find_wurm_region()
+        except Exception as error:
+            self.update(None, None, message or str(error))
+            return
+
+        self.update(vitals, region, message)
+
+    def update(
+        self,
+        vitals: Vitals | None,
+        region: tuple[int, int, int, int] | None,
+        message: str | None = None,
+    ) -> None:
+        if self.closed:
+            return
+
+        if message or vitals is None or region is None:
+            self.hide_segments()
+            self._show_message(message or "waiting for vitals...", region)
+            self._pump()
+            return
+
+        self._hide_message()
+        segments = [
+            segment
+            for frame in overlay_frames(vitals)
+            for segment in overlay_frame_segments(frame, self.marker_size)
+        ]
+        self._ensure_segment_count(len(segments))
+
+        x0, y0, _width, _height = region
+        for window, segment in zip(self._segments[: len(segments)], segments, strict=True):
+            color = "#00ff00" if segment.ok else "#ff3030"
+            window.configure(bg=color)
+            width = max(1, segment.x2 - segment.x1)
+            height = max(1, segment.y2 - segment.y1)
+            window.geometry(f"{width}x{height}+{x0 + segment.x1}+{y0 + segment.y1}")
+            window.deiconify()
+            self._raise_window(window)
+            self._configure_native_overlay_window(window)
+
+        self._pump()
+
+    def hide_segments(self) -> None:
+        for segment in self._segments:
+            try:
+                segment.withdraw()
+            except self.tk.TclError:
+                pass
+
+    def hide(self) -> None:
+        if self.closed:
+            return
+        self.hide_segments()
+        self._hide_message()
+        self._pump()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.root.destroy()
+        except self.tk.TclError:
+            pass
+
+    def _ensure_segment_count(self, count: int) -> None:
+        while len(self._segments) < count:
+            segment = self.tk.Toplevel(self.root)
+            segment.withdraw()
+            segment.title(f"{self.title} frame {len(self._segments) + 1}")
+            segment.overrideredirect(True)
+            segment.resizable(False, False)
+            segment.configure(bg="#ff3030")
+            self._raise_window(segment)
+            self._configure_native_overlay_window(segment)
+            self._segments.append(segment)
+
+        for segment in self._segments[count:]:
+            try:
+                segment.withdraw()
+            except self.tk.TclError:
+                pass
+
+    def _show_message(self, message: str, region: tuple[int, int, int, int] | None) -> None:
+        if self._message_window is None:
+            window = self.tk.Toplevel(self.root)
+            window.withdraw()
+            window.title(f"{self.title} status")
+            window.overrideredirect(True)
+            window.resizable(False, False)
+            label = self.tk.Label(
+                window,
+                bg="#101214",
+                fg="#ffbd5f",
+                padx=8,
+                pady=5,
+                text="",
+            )
+            label.pack()
+            self._message_window = window
+            self._message_label = label
+            self._configure_native_overlay_window(window)
+
+        self._message_label.configure(text=message[:120])
+        self._message_window.update_idletasks()
+        if region is None:
+            x, y = 40, 40
+        else:
+            x, y, _width, _height = region
+            x += VITALS_OVERLAY_OFFSET_X
+            y += VITALS_OVERLAY_OFFSET_Y
+        self._message_window.geometry(f"+{x}+{y}")
+        self._message_window.deiconify()
+        self._raise_window(self._message_window)
+        self._configure_native_overlay_window(self._message_window)
+
+    def _hide_message(self) -> None:
+        if self._message_window is None:
+            return
+        try:
+            self._message_window.withdraw()
+        except self.tk.TclError:
+            pass
+
+    def _raise_window(self, window) -> None:
+        try:
+            if VITALS_OVERLAY_TOPMOST:
+                window.attributes("-topmost", True)
+            window.lift()
+        except self.tk.TclError:
+            pass
+
+    def _pump(self) -> None:
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except self.tk.TclError:
+            self.closed = True
+
+    def _configure_native_overlay_window(self, window) -> None:
+        if sys.platform != "darwin":
+            return
+
+        try:
+            from AppKit import NSApplication
+            import AppKit
+        except Exception:
+            return
+
+        try:
+            self.root.update_idletasks()
+            app = NSApplication.sharedApplication()
+            ns_window = next(
+                (candidate for candidate in app.windows() if str(candidate.title()) == window.title()),
+                None,
+            )
+            if ns_window is None:
+                return
+
+            level = getattr(AppKit, "NSScreenSaverWindowLevel", None)
+            if level is None:
+                level = getattr(AppKit, "NSStatusWindowLevel", 25)
+            ns_window.setLevel_(level() if callable(level) else level)
+            ns_window.setIgnoresMouseEvents_(True)
+            ns_window.setHasShadow_(False)
+
+            behavior = 0
+            for name in (
+                "NSWindowCollectionBehaviorCanJoinAllSpaces",
+                "NSWindowCollectionBehaviorFullScreenAuxiliary",
+                "NSWindowCollectionBehaviorStationary",
+            ):
+                value = getattr(AppKit, name, 0)
+                behavior |= value() if callable(value) else value
+            if behavior:
+                ns_window.setCollectionBehavior_(ns_window.collectionBehavior() | behavior)
+        except Exception:
+            return
 
 
 def read_vitals(image: Image.Image) -> Vitals:
@@ -156,6 +639,84 @@ def sample_summary(check: VitalCheck) -> str:
     return f"{label}={check.matched_count}/{check.sample_count}"
 
 
+def overlay_samples(vitals: Vitals) -> list[VitalOverlaySample]:
+    samples = []
+    for check in (vitals.stamina, vitals.water, vitals.food):
+        invert = check.mode == "not-match"
+        for sample in check.samples:
+            samples.append(VitalOverlaySample(point=sample.point, ok=not sample.matched if invert else sample.matched))
+    return samples
+
+
+def overlay_frames(vitals: Vitals) -> list[VitalOverlayFrame]:
+    frames = []
+    for check in (vitals.stamina, vitals.water, vitals.food):
+        invert = check.mode == "not-match"
+        samples = [
+            VitalOverlaySample(point=sample.point, ok=not sample.matched if invert else sample.matched)
+            for sample in check.samples
+        ]
+        frames.append(VitalOverlayFrame(line=check.line, samples=samples))
+    return frames
+
+
+def overlay_frame_segments(frame: VitalOverlayFrame, marker_size: int) -> list[VitalOverlaySegment]:
+    if not frame.samples:
+        return []
+
+    line_x1, line_x2, line_y = frame.line
+    border = max(2, marker_size // 3)
+    gap = max(2, marker_size // 2)
+    top_y1 = line_y - gap - border
+    top_y2 = line_y - gap
+    bottom_y1 = line_y + gap + 1
+    bottom_y2 = bottom_y1 + border
+    side_y1 = top_y1
+    side_y2 = bottom_y2
+
+    samples = sorted(frame.samples, key=lambda sample: sample.point[0])
+    segments: list[VitalOverlaySegment] = []
+    for index, sample in enumerate(samples):
+        sample_x, _sample_y = sample.point
+        if index == 0:
+            x1 = line_x1
+        else:
+            previous_x = samples[index - 1].point[0]
+            x1 = round((previous_x + sample_x) / 2)
+
+        if index == len(samples) - 1:
+            x2 = line_x2 + 1
+        else:
+            next_x = samples[index + 1].point[0]
+            x2 = round((sample_x + next_x) / 2)
+
+        if x2 <= x1:
+            x2 = x1 + 1
+
+        segments.append(VitalOverlaySegment(x1=x1, y1=top_y1, x2=x2, y2=top_y2, ok=sample.ok))
+        segments.append(VitalOverlaySegment(x1=x1, y1=bottom_y1, x2=x2, y2=bottom_y2, ok=sample.ok))
+
+    segments.append(
+        VitalOverlaySegment(
+            x1=line_x1 - border - 1,
+            y1=side_y1,
+            x2=line_x1 - 1,
+            y2=side_y2,
+            ok=samples[0].ok,
+        )
+    )
+    segments.append(
+        VitalOverlaySegment(
+            x1=line_x2 + 2,
+            y1=side_y1,
+            x2=line_x2 + border + 2,
+            y2=side_y2,
+            ok=samples[-1].ok,
+        )
+    )
+    return segments
+
+
 def render_vitals_overlay(vitals: Vitals | None, message: str | None = None) -> Image.Image:
     width = max(240, VITALS_OVERLAY_WIDTH)
     height = max(90, VITALS_OVERLAY_HEIGHT)
@@ -186,40 +747,23 @@ def render_vitals_overlay(vitals: Vitals | None, message: str | None = None) -> 
 
 
 def run_vitals_overlay() -> None:
-    try:
-        import cv2
-    except ImportError as error:
-        raise RuntimeError("Vitals overlay requires opencv-python.") from error
-
     import sxtemp1
 
-    window_name = "Wurm vitals"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, VITALS_OVERLAY_WIDTH, VITALS_OVERLAY_HEIGHT)
-    _place_overlay_window(cv2, window_name, sxtemp1)
-    if VITALS_OVERLAY_TOPMOST and hasattr(cv2, "WND_PROP_TOPMOST"):
-        cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
+    overlay = VitalsPixelOverlay()
+    print(f"Vitals frame overlay is running with {overlay.backend_name} backend. Press Ctrl+C in the terminal to close.")
+    try:
+        while not overlay.closed:
+            try:
+                image = sxtemp1.screenshot()
+                overlay.update_for_wurm(read_vitals(image))
+            except Exception as error:
+                overlay.update_for_wurm(None, str(error))
 
-    print("Vitals overlay is running. Press q or Esc in the overlay window to close.")
-    last_place = 0.0
-    while True:
-        now = time.monotonic()
-        if now - last_place >= 5.0:
-            _place_overlay_window(cv2, window_name, sxtemp1)
-            last_place = now
-
-        try:
-            image = sxtemp1.screenshot()
-            frame = render_vitals_overlay(read_vitals(image))
-        except Exception as error:
-            frame = render_vitals_overlay(None, str(error))
-
-        cv2.imshow(window_name, _pil_to_bgr(frame))
-        key = cv2.waitKey(max(50, int(VITALS_POLL_SECONDS * 1000))) & 0xFF
-        if key in {27, ord("q")}:
-            break
-
-    cv2.destroyWindow(window_name)
+            time.sleep(max(0.05, VITALS_POLL_SECONDS))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        overlay.close()
 
 
 def _draw_overlay_bar(

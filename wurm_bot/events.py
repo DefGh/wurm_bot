@@ -119,6 +119,17 @@ def is_relevant_event(line: str) -> bool:
         "you damage",
         "could be improved with a log",
         "could be improved with a lump",
+        "could be improved with a string",
+        "could be improved with some string",
+        "could be improved with a rock",
+        "could be improved with rock",
+        "could be improved with some rock",
+        "could be improved with a stone",
+        "could be improved with stone",
+        "must be glowing hot",
+        "needs to be glowing hot",
+        "not hot enough",
+        "too cold",
         "too low quality",
         "too far away",
         "must use",
@@ -158,6 +169,10 @@ def event_needs_other_tool(lines: list[str]) -> bool:
 
 def event_log_too_low_quality(lines: list[str]) -> bool:
     return any("log is too low quality" in normalize(line) for line in lines)
+
+
+def event_improve_input_too_low_quality(lines: list[str]) -> bool:
+    return any("is too low quality to improve" in normalize(line) for line in lines)
 
 
 def event_too_far_away(lines: list[str]) -> bool:

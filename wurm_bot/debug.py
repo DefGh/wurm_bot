@@ -32,6 +32,7 @@ def save_debug_image(
     candidates: list[Candidate],
     prefix: str,
     log_rows: list[OcrText] | None = None,
+    row_label: str = "input",
 ) -> Path:
     SCREENS_DIR.mkdir(exist_ok=True)
     out = image.copy()
@@ -57,7 +58,7 @@ def save_debug_image(
         x2 = row.x2 + 8
         y2 = row.y2 + 4
         draw.rectangle((x1, y1, x2, y2), outline="cyan", width=3)
-        label = f"log {index}"
+        label = f"{row_label} {index}"
         text_bbox = draw.textbbox((0, 0), label, font=font)
         draw.rectangle(
             (x1 + 3, y1 + 2, x1 + 9 + text_bbox[2] - text_bbox[0], y1 + 8 + text_bbox[3] - text_bbox[1]),
