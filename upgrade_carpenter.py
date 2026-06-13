@@ -6,7 +6,7 @@ import time
 
 import sxtemp1
 
-from wurm_bot.config import DEBUG_SCREENSHOTS, IMPROVE_KEY, LOGS_DIR, REPAIR_KEY
+from wurm_bot.config import DEBUG_SCREENSHOTS, IMPROVE_KEY, LOGS_DIR, REPAIR_KEY, VITALS_POLL_SECONDS
 from wurm_bot.debug import clean_screenshot_history, save_debug_image, save_log_select_diagnostic, save_mouse_diagnostic
 from wurm_bot.events import (
     EventLogTail,
@@ -22,8 +22,34 @@ from wurm_bot.events import (
     event_too_far_away,
 )
 from wurm_bot.models import Candidate, candidate_action_point
+from wurm_bot.vitals import format_vitals, read_vitals, sample_summary, save_vitals_diagnostic
 from wurm_bot.vision import find_log_rows, is_log_active, scan
 from wurm_bot.windows import click_wurm_local, double_click_wurm_local, move_wurm_local, press, screen_to_wurm_local
+
+
+def ensure_vitals_ready() -> None:
+    last_wait_print = 0.0
+    while True:
+        image = sxtemp1.screenshot()
+        vitals = read_vitals(image)
+        blocked_checks = vitals.blocking_checks
+        if blocked_checks:
+            path = save_vitals_diagnostic(image, vitals)
+            problem = ", ".join(
+                f"{check.name} ~{check.filled_percent}% {check.status} "
+                f"{sample_summary(check)} line={check.line} target={check.target_rgb}"
+                for check in blocked_checks
+            )
+            raise RuntimeError(f"Vitals guard stopped: {problem}. Saved diagnostic: {path}")
+
+        if vitals.stamina.ok:
+            return
+
+        now = time.monotonic()
+        if now - last_wait_print >= 5.0:
+            print(f"Waiting for stamina: {format_vitals(vitals)}")
+            last_wait_print = now
+        time.sleep(max(0.1, VITALS_POLL_SECONDS))
 
 
 def select_log(image, texts, tables) -> None:
@@ -72,6 +98,7 @@ def improve_candidate(candidate: Candidate, log_tail: EventLogTail, max_improves
         if max_improves is not None and improve_presses >= max_improves:
             return "limit", improve_presses
 
+        ensure_vitals_ready()
         log_tail.mark()
         move_wurm_local(x, y)
         time.sleep(0.05)
@@ -263,6 +290,14 @@ def diagnose_window() -> None:
     print(f"Saved window diagnostic: {path}")
 
 
+def diagnose_vitals() -> None:
+    image = sxtemp1.screenshot()
+    vitals = read_vitals(image)
+    path = save_vitals_diagnostic(image, vitals)
+    print(format_vitals(vitals))
+    print(f"Saved vitals diagnostic: {path}")
+
+
 def diagnose_windows() -> None:
     if sxtemp1.sys.platform != "darwin":
         raise RuntimeError("--diagnose-windows is only supported on macOS")
@@ -294,12 +329,15 @@ def main() -> None:
     parser.add_argument("--diagnose-log-select", action="store_true", help="Move to the visible log row, double-click it, and save a diagnostic screenshot.")
     parser.add_argument("--diagnose-window", action="store_true", help="Save a screenshot of the detected Wurm window and print its region.")
     parser.add_argument("--diagnose-windows", action="store_true", help="Print visible macOS windows used for Wurm window matching.")
+    parser.add_argument("--diagnose-vitals", action="store_true", help="Print HUD vital pixel statuses and save a diagnostic screenshot.")
     args = parser.parse_args()
 
     clean_screenshot_history()
 
     if args.diagnose_windows:
         diagnose_windows()
+    elif args.diagnose_vitals:
+        diagnose_vitals()
     elif args.diagnose_window:
         diagnose_window()
     elif args.diagnose_log_select:
