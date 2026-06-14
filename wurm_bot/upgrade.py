@@ -16,6 +16,7 @@ from .events import (
     event_action_started_or_done,
     event_damaged,
     event_improve_input_too_low_quality,
+    event_input_not_needed,
     event_log_too_low_quality,
     event_needs_other_tool,
     event_needs_repair,
@@ -293,6 +294,10 @@ def improve_candidate(
 
         if event_improve_input_too_low_quality(lines):
             print(f"Skipping {candidate.name}: improve input quality is too low")
+            return "skip", improve_presses
+
+        if event_input_not_needed(lines):
+            print(f"Skipping {candidate.name}: active input is not needed")
             return "skip", improve_presses
 
         if event_self_tool_error(lines):

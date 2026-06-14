@@ -175,6 +175,14 @@ def event_improve_input_too_low_quality(lines: list[str]) -> bool:
     return any("is too low quality to improve" in normalize(line) for line in lines)
 
 
+def event_input_not_needed(lines: list[str]) -> bool:
+    markers = (
+        "does not need the touch of",
+        "doesn't need the touch of",
+    )
+    return any(any(marker in normalize(line) for marker in markers) for line in lines)
+
+
 def event_too_far_away(lines: list[str]) -> bool:
     return any("too far away" in normalize(line) for line in lines)
 
