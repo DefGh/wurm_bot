@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import re
 import time
@@ -31,14 +32,18 @@ class EventLogTail:
             self.offset = handle.tell()
         return [line.strip() for line in lines if line.strip()]
 
-    def wait_for_relevant(self, timeout: int = ACTION_TIMEOUT) -> list[str]:
+    def wait_for_relevant(
+        self,
+        timeout: int = ACTION_TIMEOUT,
+        done: Callable[[list[str]], bool] | None = None,
+    ) -> list[str]:
         deadline = time.monotonic() + timeout
         collected: list[str] = []
         while time.monotonic() < deadline:
             new_lines = self.read_new()
             collected.extend(new_lines)
             relevant = [line for line in collected if is_relevant_event(line)]
-            if relevant:
+            if relevant and (done is None or done(relevant)):
                 return relevant
             time.sleep(0.25)
         return collected
@@ -117,6 +122,8 @@ def is_relevant_event(line: str) -> bool:
     markers = (
         "you improve",
         "you damage",
+        "fail to improve",
+        "failed to improve",
         "could be improved with a log",
         "could be improved with a lump",
         "could be improved with a string",
@@ -151,6 +158,14 @@ def event_needs_repair(lines: list[str]) -> bool:
 
 def event_damaged(lines: list[str]) -> bool:
     return any("you damage" in normalize(line) for line in lines)
+
+
+def event_improved(lines: list[str]) -> bool:
+    return any("you improve" in normalize(line) for line in lines)
+
+
+def event_failed_to_improve(lines: list[str]) -> bool:
+    return any(any(marker in normalize(line) for marker in ("fail to improve", "failed to improve")) for line in lines)
 
 
 def event_needs_log(lines: list[str]) -> bool:

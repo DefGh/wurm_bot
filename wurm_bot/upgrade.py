@@ -15,7 +15,9 @@ from .events import (
     SkillLogTail,
     event_action_started_or_done,
     event_damaged,
+    event_failed_to_improve,
     event_improve_input_too_low_quality,
+    event_improved,
     event_input_not_needed,
     event_log_too_low_quality,
     event_needs_other_tool,
@@ -32,6 +34,7 @@ from .windows import click_wurm_local, double_click_wurm_local, drag_wurm_local,
 
 TARGET_CONTAINER = "container"
 TARGET_WORLD = "world"
+MAX_CONSECUTIVE_NO_IMPROVE = 5
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,14 @@ class ScanState:
     texts: list[OcrText]
     tables: list[Table]
     candidates: list[Candidate]
+
+
+@dataclass(frozen=True)
+class ImproveResult:
+    status: str
+    presses: int
+    improved: bool = False
+    no_improve_attempt: bool = False
 
 
 class VitalsOverlay:
@@ -260,7 +271,7 @@ def improve_candidate(
     overlay: VitalsOverlay,
     maintenance: "UpgradeMaintenance",
     max_improves: int | None = None,
-) -> tuple[str, int]:
+) -> ImproveResult:
     x, y = candidate_action_point(candidate)
     click_wurm_local(x, y)
     time.sleep(0.15)
@@ -268,7 +279,7 @@ def improve_candidate(
     improve_presses = 0
     for attempt in range(4):
         if max_improves is not None and improve_presses >= max_improves:
-            return "limit", improve_presses
+            return ImproveResult("limit", improve_presses)
 
         maintenance.before_improve()
         ensure_vitals_ready(profile, overlay)
@@ -278,52 +289,58 @@ def improve_candidate(
         press(IMPROVE_KEY)
         improve_presses += 1
 
-        lines = log_tail.wait_for_relevant()
+        lines = log_tail.wait_for_relevant(done=lambda relevant: improve_event_ready(profile, relevant))
         if not lines:
             raise RuntimeError(f"No relevant event log lines after Improve for {candidate.name}")
 
         for line in lines:
             print(line)
 
+        improved = event_improved(lines)
+        no_improve_attempt = not improved
+
         if event_too_far_away(lines):
             raise RuntimeError(f"Too far away while improving {candidate.name}")
 
         if event_log_too_low_quality(lines):
             print(f"Skipping {candidate.name}: active log quality is too low")
-            return "skip", improve_presses
+            return ImproveResult("skip", improve_presses)
 
         if event_improve_input_too_low_quality(lines):
             print(f"Skipping {candidate.name}: improve input quality is too low")
-            return "skip", improve_presses
+            return ImproveResult("skip", improve_presses)
 
         if event_input_not_needed(lines):
             print(f"Skipping {candidate.name}: active input is not needed")
-            return "skip", improve_presses
+            return ImproveResult("skip", improve_presses)
 
         if event_self_tool_error(lines):
             print(f"Skipping {candidate.name}: active item/tool cannot improve itself")
-            return "skip", improve_presses
+            return ImproveResult("skip", improve_presses)
 
         if event_needs_profile_input(profile, lines):
             state = capture_state(overlay)
             select_input_item(profile, state, overlay)
             time.sleep(0.2)
-            return "continue", improve_presses
+            return ImproveResult("continue", improve_presses, improved=improved, no_improve_attempt=no_improve_attempt)
 
         if profile.is_smithing and event_needs_heated_lump(lines):
             maintenance.heat_lump()
-            return "continue", improve_presses
+            return ImproveResult("continue", improve_presses, improved=improved, no_improve_attempt=no_improve_attempt)
 
         if event_needs_repair(lines) or event_damaged(lines):
             repair_candidate(candidate, log_tail)
             time.sleep(0.2)
-            return "continue", improve_presses
+            return ImproveResult("continue", improve_presses, improved=improved, no_improve_attempt=no_improve_attempt)
 
         if event_needs_other_tool(lines):
-            return "continue", improve_presses
+            return ImproveResult("continue", improve_presses, improved=improved, no_improve_attempt=no_improve_attempt)
+
+        if event_failed_to_improve(lines):
+            return ImproveResult("continue", improve_presses, improved=improved, no_improve_attempt=no_improve_attempt)
 
         if event_action_started_or_done(lines):
-            return "continue", improve_presses
+            return ImproveResult("continue", improve_presses, improved=improved)
 
         if any("too busy" in line.lower() for line in lines):
             time.sleep(0.8)
@@ -332,11 +349,29 @@ def improve_candidate(
         if attempt == 3:
             raise RuntimeError(f"Unable to improve {candidate.name}; last lines: {lines[-5:]}")
 
-    return "continue", improve_presses
+    return ImproveResult("continue", improve_presses)
 
 
 def event_needs_profile_input(profile: UpgradeProfile, lines: list[str]) -> bool:
     return any(any(marker in normalize(line) for marker in profile.input_item.need_markers) for line in lines)
+
+
+def improve_event_ready(profile: UpgradeProfile, lines: list[str]) -> bool:
+    return (
+        event_improved(lines)
+        or event_failed_to_improve(lines)
+        or event_too_far_away(lines)
+        or event_log_too_low_quality(lines)
+        or event_improve_input_too_low_quality(lines)
+        or event_input_not_needed(lines)
+        or event_self_tool_error(lines)
+        or event_needs_profile_input(profile, lines)
+        or (profile.is_smithing and event_needs_heated_lump(lines))
+        or event_needs_repair(lines)
+        or event_damaged(lines)
+        or event_needs_other_tool(lines)
+        or any("too busy" in line.lower() for line in lines)
+    )
 
 
 def event_needs_heated_lump(lines: list[str]) -> bool:
@@ -476,6 +511,10 @@ def print_skill_gains(gains: list[SkillGain]) -> None:
         print(f"- {gain.name}: +{gain.amount:.6f} -> {gain.value:.6f}{count}")
 
 
+def candidate_streak_key(candidate: Candidate) -> tuple[str, str, int, int]:
+    return candidate.table.title, candidate.name, candidate.click_x, candidate.click_y
+
+
 def run(
     profile: UpgradeProfile,
     dry_run: bool = False,
@@ -521,6 +560,7 @@ def run(
         remaining_candidates = candidates[: min(limit, len(candidates))] if limit else list(candidates)
         improve_presses = 0
         candidate_index = 0
+        no_improve_streaks: dict[tuple[str, str, int, int], int] = {}
 
         while candidate_index < len(remaining_candidates):
             if max_improves is not None and improve_presses >= max_improves:
@@ -528,18 +568,36 @@ def run(
                 break
 
             candidate = remaining_candidates[candidate_index]
+            candidate_key = candidate_streak_key(candidate)
             x, y = candidate_action_point(candidate)
             print(f"Improving: {candidate.name} at action point ({x}, {y})")
             remaining = None if max_improves is None else max_improves - improve_presses
-            status, presses = improve_candidate(profile, candidate, log_tail, overlay, maintenance, max_improves=remaining)
-            improve_presses += presses
+            result = improve_candidate(profile, candidate, log_tail, overlay, maintenance, max_improves=remaining)
+            improve_presses += result.presses
 
-            if status == "skip":
+            if result.status == "skip":
+                no_improve_streaks.pop(candidate_key, None)
                 if profile.is_world_target:
                     break
                 remaining_candidates.pop(candidate_index)
-            elif status == "limit":
+            elif result.status == "limit":
                 break
+            elif result.improved:
+                no_improve_streaks[candidate_key] = 0
+            elif result.no_improve_attempt:
+                streak = no_improve_streaks.get(candidate_key, 0) + 1
+                no_improve_streaks[candidate_key] = streak
+                print(f"{candidate.name}: no improvement streak {streak}/{MAX_CONSECUTIVE_NO_IMPROVE}")
+                if streak >= MAX_CONSECUTIVE_NO_IMPROVE:
+                    print(
+                        f"Skipping {candidate.name}: "
+                        f"{MAX_CONSECUTIVE_NO_IMPROVE} attempts in a row did not improve it"
+                    )
+                    no_improve_streaks.pop(candidate_key, None)
+                    if profile.is_world_target:
+                        break
+                    remaining_candidates.pop(candidate_index)
+                    continue
 
             time.sleep(0.3)
 
