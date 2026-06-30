@@ -317,6 +317,14 @@ def find_wurm_region() -> tuple[int, int, int, int]:
     if sys.platform == "darwin":
         return find_wurm_region_macos()
 
+    if sys.platform.startswith("win"):
+        pyautogui_region = find_wurm_region_pyautogui()
+        if pyautogui_region is not None:
+            return pyautogui_region
+        raise RuntimeError(
+            "Wurm window was not found on Windows. Set WURM_WINDOW_REGION=x,y,width,height."
+        )
+
     return find_wurm_region_x11()
 
 

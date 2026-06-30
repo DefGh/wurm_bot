@@ -20,3 +20,56 @@ screens/
 *.swp
 *.swo
 .DS_Store
+
+# Byte-compiled / optimized / DLL files
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+wheels/
+*.egg
+
+# Virtual environments
+env/
+env.bak/
+venv.bak/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+Thumbs.db
+
+# Vendored site-packages
+site-packages/
+
+# Sikuli / screenshots
+oculix/command.sikuli/
+
+# Environment overrides
+.env.local
+.env.*.local
+
+# keep existing exceptions (if any) above

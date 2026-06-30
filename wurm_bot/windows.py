@@ -10,7 +10,7 @@ from .config import USE_CLIENT_WINDOW_OFFSET
 
 
 def find_wurm_click_region() -> tuple[int, int, int, int]:
-    if sys.platform == "darwin" or not USE_CLIENT_WINDOW_OFFSET:
+    if sys.platform == "darwin" or not USE_CLIENT_WINDOW_OFFSET or sys.platform.startswith("win"):
         return sxtemp1.find_wurm_region()
 
     try:

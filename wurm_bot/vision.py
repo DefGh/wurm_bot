@@ -5,7 +5,6 @@ import re
 
 import numpy as np
 from PIL import Image
-from rapidocr_onnxruntime import RapidOCR
 
 import sxtemp1
 
@@ -13,9 +12,19 @@ from .config import MIN_ACTION_PIXELS, OCR_MIN_SCORE, ROW_HEIGHT
 from .models import Candidate, OcrText, Table
 from .text import normalize
 
+# Lazy import to avoid DLL loading issues on Windows
+_ocr_instance = None
+
+def _get_ocr():
+    global _ocr_instance
+    if _ocr_instance is None:
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr_instance = RapidOCR()
+    return _ocr_instance
+
 
 def ocr_image(image: Image.Image) -> list[OcrText]:
-    ocr = RapidOCR()
+    ocr = _get_ocr()
     result, _ = ocr(np.array(image))
     texts: list[OcrText] = []
     for box, text, score in result or []:
