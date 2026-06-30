@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import sys
 import time
@@ -14,6 +15,10 @@ from .config import (
     VITALS_FOOD_EMPTY_RGB,
     VITALS_FOOD_LINE,
     VITALS_FOOD_MIN_FILLED,
+    VITALS_NAMEPLATE_MATCH_THRESHOLD,
+    VITALS_NAMEPLATE_SEARCH_HEIGHT,
+    VITALS_NAMEPLATE_SEARCH_WIDTH,
+    VITALS_NAMEPLATE_TEMPLATE,
     VITALS_OVERLAY_HEIGHT,
     VITALS_OVERLAY_MARKER_SIZE,
     VITALS_OVERLAY_OFFSET_X,
@@ -29,6 +34,14 @@ from .config import (
     VITALS_WATER_MIN_FILLED,
     VITALS_WATER_MIN_RGB,
 )
+
+
+# Offsets are measured in source template pixels. The default nameplate asset is
+# a retina crop, so current Wurm screenshots usually match it at scale 0.5.
+NAMEPLATE_STAMINA_LINE = (18, 432, 72)
+NAMEPLATE_WATER_LINE = (18, 220, 94)
+NAMEPLATE_FOOD_LINE = (230, 432, 94)
+NAMEPLATE_MATCH_SCALES = tuple(value / 100 for value in range(35, 111, 3))
 
 
 @dataclass(frozen=True)
@@ -57,6 +70,16 @@ class VitalOverlaySegment:
     x2: int
     y2: int
     ok: bool
+
+
+@dataclass(frozen=True)
+class VitalsAnchor:
+    x: int
+    y: int
+    width: int
+    height: int
+    scale: float
+    score: float
 
 
 @dataclass(frozen=True)
@@ -93,6 +116,7 @@ class Vitals:
     stamina: VitalCheck
     water: VitalCheck
     food: VitalCheck
+    anchor: VitalsAnchor | None = None
 
     @property
     def blocking_checks(self) -> list[VitalCheck]:
@@ -559,13 +583,91 @@ class _TkVitalsPixelOverlay:
             return
 
 
+def find_vitals_nameplate(image: Image.Image) -> VitalsAnchor | None:
+    template = _nameplate_template()
+    if template is None:
+        return None
+
+    try:
+        import cv2
+    except ImportError:
+        return None
+
+    search_width = min(image.width, max(1, VITALS_NAMEPLATE_SEARCH_WIDTH))
+    search_height = min(image.height, max(1, VITALS_NAMEPLATE_SEARCH_HEIGHT))
+    search = image.crop((0, 0, search_width, search_height)).convert("RGB")
+    haystack = cv2.cvtColor(np.array(search), cv2.COLOR_RGB2GRAY)
+
+    best: tuple[float, float, tuple[int, int], tuple[int, int]] | None = None
+    for scale in NAMEPLATE_MATCH_SCALES:
+        scaled_width = max(8, int(template.shape[1] * scale))
+        scaled_height = max(8, int(template.shape[0] * scale))
+        if scaled_width > haystack.shape[1] or scaled_height > haystack.shape[0]:
+            continue
+
+        scaled = cv2.resize(template, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+        result = cv2.matchTemplate(haystack, scaled, cv2.TM_CCOEFF_NORMED)
+        _min_score, max_score, _min_loc, max_loc = cv2.minMaxLoc(result)
+        if best is None or max_score > best[0]:
+            best = (float(max_score), scale, max_loc, (scaled_width, scaled_height))
+
+    if best is None:
+        return None
+
+    score, scale, (x, y), (width, height) = best
+    if score < VITALS_NAMEPLATE_MATCH_THRESHOLD:
+        return None
+
+    return VitalsAnchor(x=x, y=y, width=width, height=height, scale=scale, score=score)
+
+
+def resolved_vital_lines(anchor: VitalsAnchor | None) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+    if anchor is None:
+        return VITALS_STAMINA_LINE, VITALS_WATER_LINE, VITALS_FOOD_LINE
+
+    return (
+        line_from_nameplate(anchor, NAMEPLATE_STAMINA_LINE),
+        line_from_nameplate(anchor, NAMEPLATE_WATER_LINE),
+        line_from_nameplate(anchor, NAMEPLATE_FOOD_LINE),
+    )
+
+
+def line_from_nameplate(anchor: VitalsAnchor, line: tuple[int, int, int]) -> tuple[int, int, int]:
+    x1_offset, x2_offset, y_offset = line
+    return (
+        anchor.x + round(x1_offset * anchor.scale),
+        anchor.x + round(x2_offset * anchor.scale),
+        anchor.y + round(y_offset * anchor.scale),
+    )
+
+
+@lru_cache(maxsize=1)
+def _nameplate_template() -> np.ndarray | None:
+    if not VITALS_NAMEPLATE_TEMPLATE.exists():
+        return None
+
+    try:
+        import cv2
+    except ImportError:
+        return None
+
+    try:
+        image = Image.open(VITALS_NAMEPLATE_TEMPLATE).convert("RGB")
+    except OSError:
+        return None
+
+    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+
+
 def read_vitals(image: Image.Image) -> Vitals:
     image = image.convert("RGB")
+    anchor = find_vitals_nameplate(image)
+    stamina_line, water_line, food_line = resolved_vital_lines(anchor)
     return Vitals(
         stamina=_check_line(
             image,
             "stamina",
-            VITALS_STAMINA_LINE,
+            stamina_line,
             VITALS_STAMINA_READY_RGB,
             VITALS_STAMINA_MIN_FILLED,
             mode="match",
@@ -575,7 +677,7 @@ def read_vitals(image: Image.Image) -> Vitals:
         water=_check_line(
             image,
             "water",
-            VITALS_WATER_LINE,
+            water_line,
             VITALS_WATER_MIN_RGB,
             VITALS_WATER_MIN_FILLED,
             mode="match",
@@ -585,13 +687,14 @@ def read_vitals(image: Image.Image) -> Vitals:
         food=_check_line(
             image,
             "food",
-            VITALS_FOOD_LINE,
+            food_line,
             VITALS_FOOD_EMPTY_RGB,
             VITALS_FOOD_MIN_FILLED,
             mode="not-match",
             ok_label="ok",
             low_label="below threshold",
         ),
+        anchor=anchor,
     )
 
 
@@ -604,6 +707,19 @@ def save_vitals_diagnostic(image: Image.Image, vitals: Vitals, output_path: Path
     draw = ImageDraw.Draw(out)
     font = _font()
     labels = []
+    if vitals.anchor is not None:
+        anchor = vitals.anchor
+        draw.rectangle(
+            (anchor.x, anchor.y, anchor.x + anchor.width, anchor.y + anchor.height),
+            outline="cyan",
+            width=1,
+        )
+        labels.append(
+            (
+                f"nameplate: score={anchor.score:.3f} scale={anchor.scale:.2f} at=({anchor.x},{anchor.y})",
+                "cyan",
+            )
+        )
     for check in (vitals.stamina, vitals.water, vitals.food):
         color = "lime" if check.ok else "red"
         x1, x2, y = check.line
@@ -627,11 +743,16 @@ def save_vitals_diagnostic(image: Image.Image, vitals: Vitals, output_path: Path
 
 
 def format_vitals(vitals: Vitals) -> str:
-    return "; ".join(
+    parts = [
         f"{check.name}=~{check.filled_percent}% {check.status} "
         f"{sample_summary(check)} target={check.target_rgb} mode={check.mode}"
         for check in (vitals.stamina, vitals.water, vitals.food)
-    )
+    ]
+    if vitals.anchor is None:
+        parts.append("source=fixed lines")
+    else:
+        parts.append(f"source=nameplate score={vitals.anchor.score:.3f} scale={vitals.anchor.scale:.2f}")
+    return "; ".join(parts)
 
 
 def sample_summary(check: VitalCheck) -> str:
@@ -664,56 +785,24 @@ def overlay_frame_segments(frame: VitalOverlayFrame, marker_size: int) -> list[V
     if not frame.samples:
         return []
 
-    line_x1, line_x2, line_y = frame.line
-    border = max(2, marker_size // 3)
-    gap = max(2, marker_size // 2)
-    top_y1 = line_y - gap - border
-    top_y2 = line_y - gap
-    bottom_y1 = line_y + gap + 1
-    bottom_y2 = bottom_y1 + border
-    side_y1 = top_y1
-    side_y2 = bottom_y2
-
-    samples = sorted(frame.samples, key=lambda sample: sample.point[0])
     segments: list[VitalOverlaySegment] = []
-    for index, sample in enumerate(samples):
-        sample_x, _sample_y = sample.point
-        if index == 0:
-            x1 = line_x1
-        else:
-            previous_x = samples[index - 1].point[0]
-            x1 = round((previous_x + sample_x) / 2)
-
-        if index == len(samples) - 1:
-            x2 = line_x2 + 1
-        else:
-            next_x = samples[index + 1].point[0]
-            x2 = round((sample_x + next_x) / 2)
-
-        if x2 <= x1:
-            x2 = x1 + 1
-
-        segments.append(VitalOverlaySegment(x1=x1, y1=top_y1, x2=x2, y2=top_y2, ok=sample.ok))
-        segments.append(VitalOverlaySegment(x1=x1, y1=bottom_y1, x2=x2, y2=bottom_y2, ok=sample.ok))
-
-    segments.append(
-        VitalOverlaySegment(
-            x1=line_x1 - border - 1,
-            y1=side_y1,
-            x2=line_x1 - 1,
-            y2=side_y2,
-            ok=samples[0].ok,
+    size = max(3, marker_size)
+    radius = max(1, size // 2)
+    border = max(1, size // 5)
+    for sample in frame.samples:
+        x, y = sample.point
+        left = x - radius
+        top = y - radius
+        right = x + radius + 1
+        bottom = y + radius + 1
+        segments.extend(
+            (
+                VitalOverlaySegment(x1=left, y1=top, x2=right, y2=top + border, ok=sample.ok),
+                VitalOverlaySegment(x1=left, y1=bottom - border, x2=right, y2=bottom, ok=sample.ok),
+                VitalOverlaySegment(x1=left, y1=top + border, x2=left + border, y2=bottom - border, ok=sample.ok),
+                VitalOverlaySegment(x1=right - border, y1=top + border, x2=right, y2=bottom - border, ok=sample.ok),
+            )
         )
-    )
-    segments.append(
-        VitalOverlaySegment(
-            x1=line_x2 + 2,
-            y1=side_y1,
-            x2=line_x2 + border + 2,
-            y2=side_y2,
-            ok=samples[-1].ok,
-        )
-    )
     return segments
 
 

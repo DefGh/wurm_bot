@@ -104,6 +104,14 @@ def _env_rgb(name: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
     return rgb
 
 
+def _env_path(name: str, default: Path) -> Path:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    path = Path(raw_value).expanduser()
+    return path if path.is_absolute() else BASE_DIR / path
+
+
 IMPROVE_KEY = "i"
 REPAIR_KEY = "o"
 ACTION_TIMEOUT = 45
@@ -126,6 +134,13 @@ VITALS_STAMINA_MIN_FILLED = _env_float("WURM_STAMINA_MIN_FILLED", 100.0)
 VITALS_WATER_MIN_FILLED = _env_float("WURM_WATER_MIN_FILLED", 70.0)
 VITALS_FOOD_MIN_FILLED = _env_float("WURM_FOOD_MIN_FILLED", 70.0)
 VITALS_POLL_SECONDS = _env_float("WURM_VITALS_POLL_SECONDS", 1.0)
+VITALS_NAMEPLATE_TEMPLATE = _env_path(
+    "WURM_VITALS_NAMEPLATE_TEMPLATE",
+    BASE_DIR / "wurm_bot" / "assets" / "vitals_templates" / "nameplate_defgh.png",
+)
+VITALS_NAMEPLATE_MATCH_THRESHOLD = _env_float("WURM_VITALS_NAMEPLATE_MATCH_THRESHOLD", 0.90)
+VITALS_NAMEPLATE_SEARCH_WIDTH = _env_int("WURM_VITALS_NAMEPLATE_SEARCH_WIDTH", 520)
+VITALS_NAMEPLATE_SEARCH_HEIGHT = _env_int("WURM_VITALS_NAMEPLATE_SEARCH_HEIGHT", 220)
 VITALS_OVERLAY_WIDTH = _env_int("WURM_VITALS_OVERLAY_WIDTH", 320)
 VITALS_OVERLAY_HEIGHT = _env_int("WURM_VITALS_OVERLAY_HEIGHT", 118)
 VITALS_OVERLAY_OFFSET_X = _env_int("WURM_VITALS_OVERLAY_OFFSET_X", 16)

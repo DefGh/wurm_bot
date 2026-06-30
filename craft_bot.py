@@ -40,6 +40,8 @@ CRAFT_DONE_MARKERS = (
 
 CRAFT_FAIL_MARKERS = (
     "could very well work next time",
+    "you almost made it",
+    "problems solved in the wrong way",
     "you fail miserably",
 )
 
@@ -124,17 +126,23 @@ def click_or_press_create(
     key: str | None,
     click_local: tuple[int, int] | None,
     auto_button: bool,
-) -> None:
+    cached_button_local: tuple[int, int] | None = None,
+) -> tuple[int, int] | None:
     if click_local is not None:
         left_click_wurm_local(*click_local)
-        return
+        return cached_button_local
+
+    if cached_button_local is not None:
+        left_click_wurm_local(*cached_button_local)
+        return cached_button_local
 
     if auto_button:
         button = find_create_button()
         if button is not None:
-            print(f"Clicking {button.text!r} at local ({button.cx}, {button.cy})")
-            left_click_wurm_local(button.cx, button.cy)
-            return
+            cached_button_local = (button.cx, button.cy)
+            print(f"Found {button.text!r} button at local {cached_button_local}; reusing this coordinate.")
+            left_click_wurm_local(*cached_button_local)
+            return cached_button_local
 
         if key is None:
             raise RuntimeError("Create/Continue button was not found. Use --click-local x,y or --key KEY.")
@@ -143,7 +151,7 @@ def click_or_press_create(
 
     if key is not None:
         press(key)
-        return
+        return cached_button_local
 
     raise RuntimeError("Either auto button detection, --key, or --click-local must be available")
 
@@ -279,6 +287,7 @@ def ensure_vitals_ready(overlay: VitalsOverlay) -> None:
 
 def run(
     count: int | None,
+    count_success: int | None,
     key: str | None,
     click_local: tuple[int, int] | None,
     auto_button: bool,
@@ -292,15 +301,16 @@ def run(
     completed = 0
     failed_attempts = 0
     iteration = 0
+    cached_button_local: tuple[int, int] | None = None
 
     try:
-        while count is None or iteration < count:
+        while (count is None or iteration < count) and (count_success is None or completed < count_success):
             iteration += 1
             if check_vitals:
                 ensure_vitals_ready(overlay)
 
             event_tail.mark()
-            click_or_press_create(key, click_local, auto_button)
+            cached_button_local = click_or_press_create(key, click_local, auto_button, cached_button_local)
             result = wait_for_craft_result(event_tail, timeout)
 
             for line in result.lines:
@@ -367,6 +377,14 @@ def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Repeat Wurm Create/Continue actions using event-log completion.")
     parser.add_argument("--count", type=int, default=None, help="Number of craft attempts. Omit to run until terminal error.")
+    parser.add_argument(
+        "--count-success",
+        "--count-sucsess",
+        dest="count_success",
+        type=int,
+        default=None,
+        help="Number of successful crafts to complete. Failed attempts do not count toward this limit.",
+    )
     parser.add_argument("--key", default=None, help="Fallback key that activates Create/Continue if OCR button detection fails.")
     parser.add_argument("--click-local", type=parse_click_local, default=None, help="Click Wurm-local Create/Continue button coordinate: x,y.")
     parser.add_argument("--timeout", type=int, default=ACTION_TIMEOUT, help="Seconds to wait for each craft result.")
@@ -388,12 +406,15 @@ def main() -> None:
 
     if args.count is not None and args.count < 1:
         raise RuntimeError("--count must be at least 1")
+    if args.count_success is not None and args.count_success < 1:
+        raise RuntimeError("--count-success must be at least 1")
 
     auto_button = args.click_local is None and not args.no_auto_button
     key = None if args.click_local is not None else args.key
     overlay = VitalsOverlay(enabled=not args.no_overlay and not args.no_vitals)
     run(
         count=args.count,
+        count_success=args.count_success,
         key=key,
         click_local=args.click_local,
         auto_button=auto_button,
